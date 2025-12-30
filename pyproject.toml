@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "largekalman"          # Must be unique on PyPI
+version = "0.0.1"
+description = "Kalman filtering for larger-than-memory data"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name="Oden Petersen", email="your.email@example.com"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
+dependencies = ["numpy"]  # if any
