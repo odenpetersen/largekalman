@@ -432,28 +432,6 @@ void write_backwards(FILE *param_file, FILE *forw_file, FILE *backw_file, int bu
 		printf("loop over.\n");
 	}
 	printf("hi\n");
-}
 
-//Smooth in batches
-
-//Compute sufficient statistics
-
-int main(int argc, char **argv) {
-	FILE *f = open_file_write("tmp/test.bin");
-	int arr[2] = {1,2};
-	write_ints(arr,2,f);
-	fclose(f);
-
-	f = open_file_read("tmp/test.bin");
-	int *out = read_ints(2,f);
-	for (int i=0; i<2; i++){
-		printf("%d\n",out[i]);
-	}
-	free(out);
-	fclose(f);
-}
-
-void* compute_suffstats(void *forw_file, void *back_file) {
-	(void)forw_file; (void)back_file;
-	return (void*)1;
+	//TODO: Return accumulated sufficient statistics
 }
