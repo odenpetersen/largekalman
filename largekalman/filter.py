@@ -25,14 +25,11 @@ lib.write_floats.restype = None
 lib.write_forwards.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 lib.write_forwards.restype = None
 
-lib.write_backwards.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+lib.write_backwards.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 lib.write_backwards.restype = None
 
-lib.read_ints.argtypes = [ctypes.c_char_p, ctypes.c_int]
-lib.read_ints.restype = ctypes.POINTER(ctypes.c_int)
-
-lib.compute_suffstats.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-lib.compute_suffstats.restype = ctypes.c_void_p
+lib.read_floats_backwards.argtypes = [ctypes.c_int, ctypes.c_void_p]
+lib.read_floats_backwards.restype = ctypes.POINTER(ctypes.c_float)
 
 # --- Python wrapper functions ---
 
@@ -70,11 +67,12 @@ def write_forwards(observations_file, forwards_file, params_file, buffer_size=10
     lib.close_file(c_params_file)
 
 
-def write_backwards(params_file, forwards_file, backwards_file, buffer_size=10000):
+def write_backwards(params_file, obs_file, forwards_file, backwards_file, buffer_size=10000):
     c_params_file = lib.open_file_read(params_file.encode('utf-8'))
+    c_obs_file = lib.open_file_read(obs_file.encode('utf-8'))
     c_forw_file = lib.open_file_read(forwards_file.encode('utf-8'))
     c_back_file = lib.open_file_write(backwards_file.encode('utf-8'))
-    lib.write_backwards(c_params_file, c_forw_file, c_back_file, buffer_size)
+    lib.write_backwards(c_params_file, c_obs_file, c_forw_file, c_back_file, buffer_size)
     lib.close_file(c_params_file)
     lib.close_file(c_forw_file)
     lib.close_file(c_back_file)
@@ -116,7 +114,7 @@ def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observat
 
     print('write backwards')
     backwards_file = f"{tmp_folder_path}/backwards.bin"
-    write_backwards(params_file, forwards_file, backwards_file)
+    write_backwards(params_file, observations_file, forwards_file, backwards_file)
 
     if not store_observations:
         os.remove(observations_file)
@@ -153,8 +151,8 @@ def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=
         os.remove(forwards_file)
         os.remove(backwards_file)
 
-
-def compute_suffstats(forwards_file, backwards_file):
+"""
+def compute_suffstats(obs_file, backwards_file):
     c_forw_file = lib.open_file_read(forwards_file.encode('utf-8'))
     c_back_file = lib.open_file_read(backwards_file.encode('utf-8'))
 
@@ -164,3 +162,4 @@ def compute_suffstats(forwards_file, backwards_file):
     lib.close_file(c_back_file)
 
     return stats
+"""
