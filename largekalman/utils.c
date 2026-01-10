@@ -60,7 +60,7 @@ void matmul_transposed(float *A, float *BT, float *res, int height_res, int comm
 		for (int j = 0; j < width_res; j++) {
 			float sum = 0;
 			for (int k = 0; k < common_dim; k++) {
-				sum += A[i*common_dim+k]*BT[j*width_res+k];
+				sum += A[i*common_dim+k]*BT[j*common_dim+k];
 			}
 			res[i*width_res+j] = sum;
 		}
