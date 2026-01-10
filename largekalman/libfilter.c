@@ -447,9 +447,9 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 							  latents_cov,
 							  n_latents * n_latents);
 
-			matmul_transposed(latents_cov_smoothed, G,
-							  latents_cov_lag1,
-							  n_latents, n_latents, n_latents);
+			matmul(G, latents_cov_smoothed_next,
+				   latents_cov_lag1,
+				   n_latents, n_latents, n_latents);
 
 			memcpy(latents_mu_smoothed_next,
 				   latents_mu_smoothed,
