@@ -143,7 +143,7 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 	const bool H_is_const = param_header[3] != 0;
 	const bool Q_is_const = param_header[4] != 0;
 	const bool R_is_const = param_header[5] != 0;
-	printf("%d %d %d %d %d %d\n",n_obs,n_latents,F_is_const,H_is_const,Q_is_const,R_is_const);
+	//printf("%d %d %d %d %d %d\n",n_obs,n_latents,F_is_const,H_is_const,Q_is_const,R_is_const);
 
 	//Handle constant param reading
 	int F_size = n_latents*n_latents;
@@ -188,11 +188,11 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 			float *Q = Q_is_const ? Q_const : &param_buffer[t*param_line_size + (F_is_const ? 0 : F_size) + (H_is_const ? 0 : H_size)];
 			float *R = R_is_const ? R_const : &param_buffer[t*param_line_size + (F_is_const ? 0 : F_size) + (H_is_const ? 0 : H_size) + (Q_is_const ? 0 : Q_size)];
 
-			printf("obs ");
+			//printf("obs ");
 			for (int i = 0; i < n_obs; i++) {
-				printf("%f ",obs[i]);
+				//printf("%f ",obs[i]);
 			}
-			printf("\n");
+			//printf("\n");
 
 			if (!latents_initialised){
 				//x <- H.T@(H@H.T)^-1@obs
@@ -235,19 +235,19 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 				vector_minusequals(latents_cov,KHP,n_latents*n_latents);
 			}
 
-			printf("latents_mu ");
+			//printf("latents_mu ");
 			for (int i = 0; i < n_latents; i++) {
-				printf("%f ",latents_mu[i]);
+				//printf("%f ",latents_mu[i]);
 			}
-			printf("\n");
-			printf("latents_cov\n");
+			//printf("\n");
+			//printf("latents_cov\n");
 			for (int i = 0; i < n_latents; i++) {
 				for (int j = 0; j < n_latents; j++) {
-					printf("%f ",latents_cov[i*n_latents+j]);
+					//printf("%f ",latents_cov[i*n_latents+j]);
 				}
-				printf("\n");
+				//printf("\n");
 			}
-			printf("\n");
+			//printf("\n");
 			fwrite(latents_mu, sizeof(float), n_latents, forw_file);
 			fwrite(latents_cov, sizeof(float), n_latents*n_latents, forw_file);
 		}
@@ -258,7 +258,7 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 
 //Backwards step
 void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *backw_file, int buffer_size) {
-	printf("calling write_backwards\n");
+	//printf("calling write_backwards\n");
 	int param_header[6];
 	//fseek(param_file, 0, SEEK_SET);
 	fread(param_header, sizeof(int), 6, param_file);
@@ -302,7 +302,7 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 		(R_is_const ? 0 : R_size);
 
 	int forw_stride = n_latents + n_latents * n_latents;
-	printf("hello! n_latents=%d, forw_stride=%d, buffer_size=%d\n",n_latents,forw_stride,buffer_size);
+	//printf("hello! n_latents=%d, forw_stride=%d, buffer_size=%d\n",n_latents,forw_stride,buffer_size);
 
 	float forw_buffer[buffer_size * forw_stride];
 	float param_buffer[buffer_size * param_line_size + 1];//+1 to prevent zero-sized VLA
@@ -321,7 +321,7 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 
 	float latents_cov_lag1[n_latents * n_latents];
 
-	printf("hey\n");
+	//printf("hey\n");
 	fseek(forw_file, 0, SEEK_END);
 	long end_pos = ftell(forw_file);
 
@@ -350,14 +350,14 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 	memset(obs_prod_latents_mu_smoothed_sum,0,n_obs*n_latents);
 	int num_datapoints = 0;
 
-	printf("just before do loop starts. forw_stride = %d, n_latents = %d\n",forw_stride,n_latents);
+	//printf("just before do loop starts. forw_stride = %d, n_latents = %d\n",forw_stride,n_latents);
 	while (true) {
-		printf("start of iter!\n");
+		//printf("start of iter!\n");
 		long cur_pos = ftell(forw_file);
-		printf("cur_pos = %ld\n",cur_pos);
+		//printf("cur_pos = %ld\n",cur_pos);
 		long floats_left = cur_pos / sizeof(float);
 		int steps = floats_left / forw_stride;
-		printf("steps = %d\n",steps);
+		//printf("steps = %d\n",steps);
 		if (steps > buffer_size) {
 			steps = buffer_size;
 		}
@@ -365,13 +365,13 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 			break;
 		}
 
-		printf("determining block_start_pos\n");
+		//printf("determining block_start_pos\n");
 		long block_start_pos = cur_pos - sizeof(float) * forw_stride * steps;
 		if (block_start_pos < 0) {
 			break;
 		}
 
-		printf("Attempting fseek\n");
+		//printf("Attempting fseek\n");
 
 		fseek(forw_file, block_start_pos, SEEK_SET);
 		fread(forw_buffer, sizeof(float), steps * forw_stride, forw_file);
@@ -384,11 +384,11 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 			  SEEK_SET);
 		fread(param_buffer, sizeof(float), steps * param_line_size, param_file);
 
-		printf("attempting ftell\n");
-		printf("ftell(forw_file) = %ld\n", ftell(forw_file));
+		//printf("attempting ftell\n");
+		//printf("ftell(forw_file) = %ld\n", ftell(forw_file));
 
 		for (int b = steps - 1; b >= 0; b--) {
-			printf("loop iter starting. b/steps = %d/%d\n",b,steps);
+			//printf("loop iter starting. b/steps = %d/%d\n",b,steps);
 			float *forw_ptr = &forw_buffer[b * forw_stride];
 
 			memcpy(latents_mu, forw_ptr, sizeof(float) * n_latents);
@@ -485,17 +485,17 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 			fwrite(latents_cov_smoothed,sizeof(float),n_latents*n_latents,backw_file);
 			fwrite(latents_cov_lag1,sizeof(float),n_latents*n_latents,backw_file);
 
-			printf("loop iter. b/steps = %d/%d\n",b,steps);
-			printf("attempting ftell\n");
-			printf("ftell(forw_file) = %ld\n", ftell(forw_file));
+			//printf("loop iter. b/steps = %d/%d\n",b,steps);
+			//printf("attempting ftell\n");
+			//printf("ftell(forw_file) = %ld\n", ftell(forw_file));
 		}
-		printf("loop over.\n");
+		//printf("loop over.\n");
 	}
-	printf("hi\n");
+	//printf("hi\n");
 
 	//TODO: Return accumulated sufficient statistics
 	
 	for (int i = 0; i < n_latents; i++) {
-		printf("%f\n",latents_mu_smoothed_sum[i]/num_datapoints);
+		//printf("%f\n",latents_mu_smoothed_sum[i]/num_datapoints);
 	}
 }

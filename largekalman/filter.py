@@ -122,25 +122,32 @@ def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observat
     return forwards_file, backwards_file
 
 
-def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True):
+def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True, batch_size=10000):
     forwards_file, backwards_file = write_files(tmp_folder_path, F,Q,H,R, observations_iter,
                                                 store_observations=store_observations)
     n_latents = len(Q)
     record_size = n_latents + 2 * n_latents * n_latents  # mu + cov + lag1_cov
+    record_bytes = record_size * 4
 
     with open(backwards_file, 'rb') as f:
-        f.seek(0, 2)  # seek to end
+        f.seek(0, 2)
         file_size = f.tell()
-        num_records = file_size // (record_size * 4)  # 4 bytes per float
+        num_records = file_size // record_bytes
 
-        for i in range(num_records):
-            f.seek(file_size - (i + 1) * record_size * 4)
+        records_read = 0
+        while records_read < num_records:
+            batch_records = min(batch_size, num_records - records_read)
+            f.seek(file_size - (records_read + batch_records) * record_bytes)
             data = array.array('f')
-            data.fromfile(f, record_size)
-            mu = data[:n_latents].tolist()
-            cov = [data[n_latents + j*n_latents : n_latents + (j+1)*n_latents].tolist() for j in range(n_latents)]
-            lag1_cov = [data[n_latents + n_latents*n_latents + j*n_latents : n_latents + n_latents*n_latents + (j+1)*n_latents].tolist() for j in range(n_latents)]
-            yield mu, cov, lag1_cov
+            data.fromfile(f, batch_records * record_size)
+
+            for i in range(batch_records - 1, -1, -1):
+                offset = i * record_size
+                mu = data[offset:offset+n_latents].tolist()
+                cov = [data[offset+n_latents+j*n_latents:offset+n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
+                lag1_cov = [data[offset+n_latents+n_latents*n_latents+j*n_latents:offset+n_latents+n_latents*n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
+                yield mu, cov, lag1_cov
+            records_read += batch_records
 
     os.remove(forwards_file)
     os.remove(backwards_file)
