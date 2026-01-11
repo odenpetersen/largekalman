@@ -67,6 +67,18 @@ void matmul_transposed(float *A, float *BT, float *res, int height_res, int comm
 	}
 }
 
+void matmul_left_transposed(float *A, float *B, float *res, int height_res, int common_dim, int width_res) {
+	for (int i = 0; i < height_res; i++) {
+		for (int j = 0; j < width_res; j++) {
+			float sum = 0;
+			for (int k = 0; k < common_dim; k++) {
+				sum += A[k*height_res+i]*B[k*width_res+j];
+			}
+			res[i*width_res+j] = sum;
+		}
+	}
+}
+
 void vector_plusequals(float *A, float *B, int n) {
 	for (int i = 0; i < n; i++) {
 		A[i] += B[i];

@@ -155,13 +155,13 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 	if (F_is_const) {
 		fread(F_const, sizeof(float), F_size, param_file);
 	}
-	float H_const[H_size];
-	if (H_is_const) {
-		fread(H_const, sizeof(float), H_size, param_file);
-	}
 	float Q_const[Q_size];
 	if (Q_is_const) {
 		fread(Q_const, sizeof(float), Q_size, param_file);
+	}
+	float H_const[H_size];
+	if (H_is_const) {
+		fread(H_const, sizeof(float), H_size, param_file);
 	}
 	float R_const[R_size];
 	if (R_is_const) {
@@ -229,10 +229,10 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 				float latents_update[n_latents];
 				matmul_transposed(obs,KT,latents_update,1,n_obs,n_latents);
 				vector_plusequals(latents_mu,latents_update,n_latents);
-				//P <- (I-K@H)@P
-				float KHP_T[n_latents*n_latents];
-				matmul_transposed(KT,HP,KHP_T, n_latents, n_obs, n_latents);
-				vector_minusequals(latents_cov,KHP_T,n_latents*n_latents);//possible catastrophic cancellation
+				//P <- P - HP^T @ KT (where KT = S^{-1} @ HP)
+				float KHP[n_latents*n_latents];
+				matmul_left_transposed(HP,KT,KHP, n_latents, n_obs, n_latents);
+				vector_minusequals(latents_cov,KHP,n_latents*n_latents);
 			}
 
 			printf("latents_mu ");
@@ -283,11 +283,11 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 	if (F_is_const) {
 		fread(F_const, sizeof(float), F_size, param_file);
 	}
-	if (H_is_const) {
-		fread(H_const, sizeof(float), H_size, param_file);
-	}
 	if (Q_is_const) {
 		fread(Q_const, sizeof(float), Q_size, param_file);
+	}
+	if (H_is_const) {
+		fread(H_const, sizeof(float), H_size, param_file);
 	}
 	if (R_is_const) {
 		fread(R_const, sizeof(float), R_size, param_file);
@@ -328,6 +328,16 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 	fseek(forw_file, end_pos - sizeof(float) * forw_stride, SEEK_SET);
 	fread(latents_mu_smoothed_next, sizeof(float), n_latents, forw_file);
 	fread(latents_cov_smoothed_next, sizeof(float), n_latents * n_latents, forw_file);
+
+	// Write last timestep directly (smoothed = filtered, no lag1_cov)
+	fwrite(latents_mu_smoothed_next, sizeof(float), n_latents, backw_file);
+	fwrite(latents_cov_smoothed_next, sizeof(float), n_latents * n_latents, backw_file);
+	float zeros[n_latents * n_latents];
+	memset(zeros, 0, n_latents * n_latents * sizeof(float));
+	fwrite(zeros, sizeof(float), n_latents * n_latents, backw_file);
+
+	// Position to second-to-last timestep for the smoothing loop
+	fseek(forw_file, end_pos - sizeof(float) * forw_stride, SEEK_SET);
 
 	//Sufficient statistics
 	float latents_mu_smoothed_sum[n_latents];
@@ -471,9 +481,9 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 
 			//also need: sum y; sum y@y.T
 
-			//fwrite(latents_mu_smoothed,sizeof(float),n_latents,backw_file);
-			//fwrite(latents_cov_smoothed,sizeof(float),n_latents*n_latents,backw_file);
-			//fwrite(latents_cov_lag1,sizeof(float),n_latents*n_latents,backw_file);
+			fwrite(latents_mu_smoothed,sizeof(float),n_latents,backw_file);
+			fwrite(latents_cov_smoothed,sizeof(float),n_latents*n_latents,backw_file);
+			fwrite(latents_cov_lag1,sizeof(float),n_latents*n_latents,backw_file);
 
 			printf("loop iter. b/steps = %d/%d\n",b,steps);
 			printf("attempting ftell\n");

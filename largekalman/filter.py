@@ -122,34 +122,28 @@ def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observat
     return forwards_file, backwards_file
 
 
-def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True, batch_size=256000):
-    print('writing files')
+def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True):
     forwards_file, backwards_file = write_files(tmp_folder_path, F,Q,H,R, observations_iter,
                                                 store_observations=store_observations)
-    print("wrote files")
+    n_latents = len(Q)
+    record_size = n_latents + 2 * n_latents * n_latents  # mu + cov + lag1_cov
 
-    print('opening files')
-    c_forw_file = lib.open_file_read(forwards_file.encode('utf-8'))
-    c_back_file = lib.open_file_read(backwards_file.encode('utf-8'))
+    with open(backwards_file, 'rb') as f:
+        f.seek(0, 2)  # seek to end
+        file_size = f.tell()
+        num_records = file_size // (record_size * 4)  # 4 bytes per float
 
-    print('main logic')
-    try:
-        while True:
-            batch_ptr = lib.smooth()
-            if not batch_ptr:
-                break
+        for i in range(num_records):
+            f.seek(file_size - (i + 1) * record_size * 4)
+            data = array.array('f')
+            data.fromfile(f, record_size)
+            mu = data[:n_latents].tolist()
+            cov = [data[n_latents + j*n_latents : n_latents + (j+1)*n_latents].tolist() for j in range(n_latents)]
+            lag1_cov = [data[n_latents + n_latents*n_latents + j*n_latents : n_latents + n_latents*n_latents + (j+1)*n_latents].tolist() for j in range(n_latents)]
+            yield mu, cov, lag1_cov
 
-            # Convert C buffer to Python array
-            buf = array.array('f', [0.0] * (dim * batch_size))  # allocated buffer
-            ctypes.memmove(buf.buffer_info()[0], batch_ptr, dim * batch_size * ctypes.sizeof(ctypes.c_float))
-            yield buf.tolist()
-    finally:
-        print('closing files')
-        lib.close_file(c_forw_file)
-        lib.close_file(c_back_file)
-        input("removing (press return)")
-        os.remove(forwards_file)
-        os.remove(backwards_file)
+    os.remove(forwards_file)
+    os.remove(backwards_file)
 
 """
 def compute_suffstats(obs_file, backwards_file):
