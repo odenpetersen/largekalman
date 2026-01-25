@@ -4,6 +4,30 @@
 #include <string.h>
 #include "utils.c"
 
+typedef struct {
+	int n_obs;
+	int n_latents;
+	int num_datapoints;
+	float *latents_mu_sum;         // [n_latents]
+	float *latents_cov_sum;        // [n_latents * n_latents]
+	float *latents_cov_lag1_sum;   // [n_latents * n_latents]
+	float *obs_sum;                // [n_obs]
+	float *obs_obs_sum;            // [n_obs * n_obs]
+	float *obs_latents_sum;        // [n_obs * n_latents]
+} SuffStats;
+
+void free_suffstats(SuffStats *stats) {
+	if (stats) {
+		free(stats->latents_mu_sum);
+		free(stats->latents_cov_sum);
+		free(stats->latents_cov_lag1_sum);
+		free(stats->obs_sum);
+		free(stats->obs_obs_sum);
+		free(stats->obs_latents_sum);
+		free(stats);
+	}
+}
+
 //1. Params file generator (forwards and backwards)
 //2. Filter generator & write to disk
 //3. Smoother backwards generator
@@ -257,7 +281,7 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 }
 
 //Backwards step
-void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *backw_file, int buffer_size) {
+SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *backw_file, int buffer_size) {
 	//printf("calling write_backwards\n");
 	int param_header[6];
 	//fseek(param_file, 0, SEEK_SET);
@@ -306,6 +330,12 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 
 	float forw_buffer[buffer_size * forw_stride];
 	float param_buffer[buffer_size * param_line_size + 1];//+1 to prevent zero-sized VLA
+	float obs_buffer[buffer_size * n_obs];
+
+	// Read obs file header and get data start position
+	int obs_header[1];
+	fread(obs_header, sizeof(int), 1, obs_file);
+	long obs_data_start = ftell(obs_file);
 
 	float latents_mu[n_latents];
 	float latents_cov[n_latents * n_latents];
@@ -339,16 +369,39 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 	// Position to second-to-last timestep for the smoothing loop
 	fseek(forw_file, end_pos - sizeof(float) * forw_stride, SEEK_SET);
 
-	//Sufficient statistics
-	float latents_mu_smoothed_sum[n_latents];
-	memset(latents_mu_smoothed_sum,0,n_latents);
-	float latents_cov_smoothed_sum[n_latents*n_latents];
-	memset(latents_cov_smoothed_sum,0,n_latents*n_latents);
-	float latents_cov_lag1_sum[n_latents*n_latents];
-	memset(latents_cov_lag1_sum,0,n_latents*n_latents);
-	float obs_prod_latents_mu_smoothed_sum[n_obs*n_latents];
-	memset(obs_prod_latents_mu_smoothed_sum,0,n_obs*n_latents);
-	int num_datapoints = 0;
+	//Sufficient statistics - allocate struct
+	SuffStats *stats = malloc(sizeof(SuffStats));
+	stats->n_obs = n_obs;
+	stats->n_latents = n_latents;
+	stats->num_datapoints = 0;
+	stats->latents_mu_sum = calloc(n_latents, sizeof(float));
+	stats->latents_cov_sum = calloc(n_latents * n_latents, sizeof(float));
+	stats->latents_cov_lag1_sum = calloc(n_latents * n_latents, sizeof(float));
+	stats->obs_sum = calloc(n_obs, sizeof(float));
+	stats->obs_obs_sum = calloc(n_obs * n_obs, sizeof(float));
+	stats->obs_latents_sum = calloc(n_obs * n_latents, sizeof(float));
+
+	// Accumulate stats for last timestep (no lag1_cov for this one)
+	fseek(obs_file, 0, SEEK_END);
+	long obs_end_pos = ftell(obs_file);
+	fseek(obs_file, obs_end_pos - sizeof(float) * n_obs, SEEK_SET);
+	float last_obs[n_obs];
+	fread(last_obs, sizeof(float), n_obs, obs_file);
+
+	vector_plusequals(stats->latents_mu_sum, latents_mu_smoothed_next, n_latents);
+	vector_plusequals(stats->latents_cov_sum, latents_cov_smoothed_next, n_latents * n_latents);
+	// No lag1_cov for last timestep
+	vector_plusequals(stats->obs_sum, last_obs, n_obs);
+
+	float last_obs_obs[n_obs * n_obs];
+	matmul_transposed(last_obs, last_obs, last_obs_obs, n_obs, 1, n_obs);
+	vector_plusequals(stats->obs_obs_sum, last_obs_obs, n_obs * n_obs);
+
+	float last_obs_latents[n_obs * n_latents];
+	matmul_transposed(last_obs, latents_mu_smoothed_next, last_obs_latents, n_obs, 1, n_latents);
+	vector_plusequals(stats->obs_latents_sum, last_obs_latents, n_obs * n_latents);
+
+	stats->num_datapoints++;
 
 	//printf("just before do loop starts. forw_stride = %d, n_latents = %d\n",forw_stride,n_latents);
 	while (true) {
@@ -383,6 +436,12 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 			  param_data_start + t0 * param_line_size * sizeof(float),
 			  SEEK_SET);
 		fread(param_buffer, sizeof(float), steps * param_line_size, param_file);
+
+		// Read observations for this batch
+		fseek(obs_file,
+			  obs_data_start + t0 * n_obs * sizeof(float),
+			  SEEK_SET);
+		fread(obs_buffer, sizeof(float), steps * n_obs, obs_file);
 
 		//printf("attempting ftell\n");
 		//printf("ftell(forw_file) = %ld\n", ftell(forw_file));
@@ -470,16 +529,25 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 
 
 			//Sufficient statistics
-			float obs_prod_latents_mu_smoothed[n_obs*n_latents];
-			//matmul_transposed(obs,latents_mu_smoothed,obs_prod_latents_mu_smoothed,n_obs,1,n_latents);
-			
-			vector_plusequals(latents_mu_smoothed_sum, latents_mu_smoothed, n_latents);
-			vector_plusequals(latents_cov_smoothed_sum, latents_cov_smoothed, n_latents*n_latents);
-			vector_plusequals(latents_cov_lag1_sum, latents_cov_lag1, n_latents*n_latents);
-			//vector_plusequals(obs_prod_latents_mu_smoothed_sum, obs_prod_latents_mu_smoothed, n_obs*n_latents);
-			num_datapoints++;
+			vector_plusequals(stats->latents_mu_sum, latents_mu_smoothed, n_latents);
+			vector_plusequals(stats->latents_cov_sum, latents_cov_smoothed, n_latents*n_latents);
+			vector_plusequals(stats->latents_cov_lag1_sum, latents_cov_lag1, n_latents*n_latents);
 
-			//also need: sum y; sum y@y.T
+			// Observation statistics
+			float *obs = &obs_buffer[b * n_obs];
+			vector_plusequals(stats->obs_sum, obs, n_obs);
+
+			// obs @ obs.T (outer product)
+			float obs_obs[n_obs * n_obs];
+			matmul_transposed(obs, obs, obs_obs, n_obs, 1, n_obs);
+			vector_plusequals(stats->obs_obs_sum, obs_obs, n_obs * n_obs);
+
+			// obs @ latents_mu_smoothed.T (cross term)
+			float obs_latents[n_obs * n_latents];
+			matmul_transposed(obs, latents_mu_smoothed, obs_latents, n_obs, 1, n_latents);
+			vector_plusequals(stats->obs_latents_sum, obs_latents, n_obs * n_latents);
+
+			stats->num_datapoints++;
 
 			fwrite(latents_mu_smoothed,sizeof(float),n_latents,backw_file);
 			fwrite(latents_cov_smoothed,sizeof(float),n_latents*n_latents,backw_file);
@@ -491,11 +559,6 @@ void write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *ba
 		}
 		//printf("loop over.\n");
 	}
-	//printf("hi\n");
 
-	//TODO: Return accumulated sufficient statistics
-	
-	for (int i = 0; i < n_latents; i++) {
-		//printf("%f\n",latents_mu_smoothed_sum[i]/num_datapoints);
-	}
+	return stats;
 }

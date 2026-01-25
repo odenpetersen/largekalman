@@ -26,10 +26,27 @@ lib.write_forwards.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
 lib.write_forwards.restype = None
 
 lib.write_backwards.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
-lib.write_backwards.restype = None
 
 lib.read_floats_backwards.argtypes = [ctypes.c_int, ctypes.c_void_p]
 lib.read_floats_backwards.restype = ctypes.POINTER(ctypes.c_float)
+
+class SuffStats(ctypes.Structure):
+    _fields_ = [
+        ("n_obs", ctypes.c_int),
+        ("n_latents", ctypes.c_int),
+        ("num_datapoints", ctypes.c_int),
+        ("latents_mu_sum", ctypes.POINTER(ctypes.c_float)),
+        ("latents_cov_sum", ctypes.POINTER(ctypes.c_float)),
+        ("latents_cov_lag1_sum", ctypes.POINTER(ctypes.c_float)),
+        ("obs_sum", ctypes.POINTER(ctypes.c_float)),
+        ("obs_obs_sum", ctypes.POINTER(ctypes.c_float)),
+        ("obs_latents_sum", ctypes.POINTER(ctypes.c_float)),
+    ]
+
+lib.write_backwards.restype = ctypes.POINTER(SuffStats)
+
+lib.free_suffstats.argtypes = [ctypes.POINTER(SuffStats)]
+lib.free_suffstats.restype = None
 
 # --- Python wrapper functions ---
 
@@ -72,10 +89,30 @@ def write_backwards(params_file, obs_file, forwards_file, backwards_file, buffer
     c_obs_file = lib.open_file_read(obs_file.encode('utf-8'))
     c_forw_file = lib.open_file_read(forwards_file.encode('utf-8'))
     c_back_file = lib.open_file_write(backwards_file.encode('utf-8'))
-    lib.write_backwards(c_params_file, c_obs_file, c_forw_file, c_back_file, buffer_size)
+
+    stats_ptr = lib.write_backwards(c_params_file, c_obs_file, c_forw_file, c_back_file, buffer_size)
+
     lib.close_file(c_params_file)
+    lib.close_file(c_obs_file)
     lib.close_file(c_forw_file)
     lib.close_file(c_back_file)
+
+    # Convert to Python dict
+    stats = stats_ptr.contents
+    result = {
+        'n_obs': stats.n_obs,
+        'n_latents': stats.n_latents,
+        'num_datapoints': stats.num_datapoints,
+        'latents_mu_sum': [stats.latents_mu_sum[i] for i in range(stats.n_latents)],
+        'latents_cov_sum': [stats.latents_cov_sum[i] for i in range(stats.n_latents * stats.n_latents)],
+        'latents_cov_lag1_sum': [stats.latents_cov_lag1_sum[i] for i in range(stats.n_latents * stats.n_latents)],
+        'obs_sum': [stats.obs_sum[i] for i in range(stats.n_obs)],
+        'obs_obs_sum': [stats.obs_obs_sum[i] for i in range(stats.n_obs * stats.n_obs)],
+        'obs_latents_sum': [stats.obs_latents_sum[i] for i in range(stats.n_obs * stats.n_latents)],
+    }
+
+    lib.free_suffstats(stats_ptr)
+    return result
 
 def write_params(F,Q,H,R,params_file):
     c_params_file = lib.open_file_write(params_file.encode('utf-8'))
@@ -114,53 +151,43 @@ def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observat
 
     print('write backwards')
     backwards_file = f"{tmp_folder_path}/backwards.bin"
-    write_backwards(params_file, observations_file, forwards_file, backwards_file)
+    stats = write_backwards(params_file, observations_file, forwards_file, backwards_file)
 
     if not store_observations:
         os.remove(observations_file)
 
-    return forwards_file, backwards_file
+    return forwards_file, backwards_file, stats
 
 
 def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True, batch_size=10000):
-    forwards_file, backwards_file = write_files(tmp_folder_path, F,Q,H,R, observations_iter,
-                                                store_observations=store_observations)
+    forwards_file, backwards_file, stats = write_files(tmp_folder_path, F,Q,H,R, observations_iter,
+                                                        store_observations=store_observations)
     n_latents = len(Q)
     record_size = n_latents + 2 * n_latents * n_latents  # mu + cov + lag1_cov
     record_bytes = record_size * 4
 
-    with open(backwards_file, 'rb') as f:
-        f.seek(0, 2)
-        file_size = f.tell()
-        num_records = file_size // record_bytes
+    def gen():
+        with open(backwards_file, 'rb') as f:
+            f.seek(0, 2)
+            file_size = f.tell()
+            num_records = file_size // record_bytes
 
-        records_read = 0
-        while records_read < num_records:
-            batch_records = min(batch_size, num_records - records_read)
-            f.seek(file_size - (records_read + batch_records) * record_bytes)
-            data = array.array('f')
-            data.fromfile(f, batch_records * record_size)
+            records_read = 0
+            while records_read < num_records:
+                batch_records = min(batch_size, num_records - records_read)
+                f.seek(file_size - (records_read + batch_records) * record_bytes)
+                data = array.array('f')
+                data.fromfile(f, batch_records * record_size)
 
-            for i in range(batch_records - 1, -1, -1):
-                offset = i * record_size
-                mu = data[offset:offset+n_latents].tolist()
-                cov = [data[offset+n_latents+j*n_latents:offset+n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
-                lag1_cov = [data[offset+n_latents+n_latents*n_latents+j*n_latents:offset+n_latents+n_latents*n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
-                yield mu, cov, lag1_cov
-            records_read += batch_records
+                for i in range(batch_records - 1, -1, -1):
+                    offset = i * record_size
+                    mu = data[offset:offset+n_latents].tolist()
+                    cov = [data[offset+n_latents+j*n_latents:offset+n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
+                    lag1_cov = [data[offset+n_latents+n_latents*n_latents+j*n_latents:offset+n_latents+n_latents*n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
+                    yield mu, cov, lag1_cov
+                records_read += batch_records
 
-    os.remove(forwards_file)
-    os.remove(backwards_file)
+        os.remove(forwards_file)
+        os.remove(backwards_file)
 
-"""
-def compute_suffstats(obs_file, backwards_file):
-    c_forw_file = lib.open_file_read(forwards_file.encode('utf-8'))
-    c_back_file = lib.open_file_read(backwards_file.encode('utf-8'))
-
-    stats = lib.compute_suffstats(c_forw_file, c_back_file)
-
-    lib.close_file(c_forw_file)
-    lib.close_file(c_back_file)
-
-    return stats
-"""
+    return gen(), stats
