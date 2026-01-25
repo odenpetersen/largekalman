@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "utils.c"
 
 typedef struct {
@@ -389,7 +390,13 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 	fread(last_obs, sizeof(float), n_obs, obs_file);
 
 	vector_plusequals(stats->latents_mu_sum, latents_mu_smoothed_next, n_latents);
+
+	// E[x_T x_T^T] = P_T + mu_T @ mu_T^T
 	vector_plusequals(stats->latents_cov_sum, latents_cov_smoothed_next, n_latents * n_latents);
+	float last_mu_outer[n_latents * n_latents];
+	matmul_transposed(latents_mu_smoothed_next, latents_mu_smoothed_next, last_mu_outer, n_latents, 1, n_latents);
+	vector_plusequals(stats->latents_cov_sum, last_mu_outer, n_latents * n_latents);
+
 	// No lag1_cov for last timestep
 	vector_plusequals(stats->obs_sum, last_obs, n_obs);
 
@@ -473,15 +480,25 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 			vector_plusequals(latents_cov_pred, Q,
 							  n_latents * n_latents);
 
-			float G[n_latents * n_latents];
-			matmul_transposed(latents_cov, F, G,
-							  n_latents, n_latents, n_latents);
+			// RTS gain: G = P @ F^T @ P_pred^{-1}
+			// Compute as: tmp = F @ P, solve P_pred @ X = tmp, then G = X^T
+			float tmp[n_latents * n_latents];
+			matmul(F, latents_cov, tmp,
+				   n_latents, n_latents, n_latents);
 
 			float latents_cov_pred_copy[n_latents * n_latents];
 			memcpy(latents_cov_pred_copy, latents_cov_pred,
 				   sizeof(float) * n_latents * n_latents);
-			solve(latents_cov_pred_copy, G,
+			solve(latents_cov_pred_copy, tmp,
 				  n_latents, n_latents);
+
+			// Transpose to get G = P @ F^T @ P_pred^{-1}
+			float G[n_latents * n_latents];
+			for (int i = 0; i < n_latents; i++) {
+				for (int j = 0; j < n_latents; j++) {
+					G[i * n_latents + j] = tmp[j * n_latents + i];
+				}
+			}
 
 			memcpy(latents_mu_smoothed,
 				   latents_mu_smoothed_next,
@@ -530,8 +547,18 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 
 			//Sufficient statistics
 			vector_plusequals(stats->latents_mu_sum, latents_mu_smoothed, n_latents);
+
+			// E[x_t x_t^T] = P_t + mu_t @ mu_t^T
 			vector_plusequals(stats->latents_cov_sum, latents_cov_smoothed, n_latents*n_latents);
+			float mu_outer[n_latents * n_latents];
+			matmul_transposed(latents_mu_smoothed, latents_mu_smoothed, mu_outer, n_latents, 1, n_latents);
+			vector_plusequals(stats->latents_cov_sum, mu_outer, n_latents*n_latents);
+
+			// E[x_{t+1} x_t^T] = Cov(x_{t+1}, x_t) + mu_{t+1} @ mu_t^T
 			vector_plusequals(stats->latents_cov_lag1_sum, latents_cov_lag1, n_latents*n_latents);
+			float mu_cross[n_latents * n_latents];
+			matmul_transposed(latents_mu_smoothed_next, latents_mu_smoothed, mu_cross, n_latents, 1, n_latents);
+			vector_plusequals(stats->latents_cov_lag1_sum, mu_cross, n_latents*n_latents);
 
 			// Observation statistics
 			float *obs = &obs_buffer[b * n_obs];

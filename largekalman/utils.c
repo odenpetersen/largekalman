@@ -92,14 +92,38 @@ void vector_minusequals(float *A, float *B, int n) {
 }
 
 void solve(float *A, float *B, int n, int m) {
-	// Gaussian elimination
+	// Gaussian elimination with partial pivoting
 	for (int k = 0; k < n; k++) {
+		// Find pivot
+		int max_row = k;
+		float max_val = fabsf(A[k*n+k]);
+		for (int i = k+1; i < n; i++) {
+			if (fabsf(A[i*n+k]) > max_val) {
+				max_val = fabsf(A[i*n+k]);
+				max_row = i;
+			}
+		}
+
+		// Swap rows if needed
+		if (max_row != k) {
+			for (int j = 0; j < n; j++) {
+				float tmp = A[k*n+j];
+				A[k*n+j] = A[max_row*n+j];
+				A[max_row*n+j] = tmp;
+			}
+			for (int j = 0; j < m; j++) {
+				float tmp = B[k*m+j];
+				B[k*m+j] = B[max_row*m+j];
+				B[max_row*m+j] = tmp;
+			}
+		}
+
 		for (int i = k+1; i < n; i++) {
 			float factor = A[i*n+k] / A[k*n+k];
 			for (int j = k; j < n; j++) {
 				A[i*n+j] -= factor * A[k*n+j];
 			}
-	
+
 			for (int j = 0; j < m; j++) {
 				B[i*m+j] -= factor * B[k*m+j];
 			}
