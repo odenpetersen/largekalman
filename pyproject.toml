@@ -3,16 +3,43 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "largekalman"          # Must be unique on PyPI
-version = "0.0.1"
-description = "Kalman filtering for larger-than-memory data"
+name = "largekalman"
+version = "0.1.0"
+description = "Kalman filtering and smoothing for larger-than-memory datasets"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
-authors = [{name="Oden Petersen", email="your.email@example.com"}]
+license = "MIT"
+authors = [{name = "Oden Petersen"}]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent"
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C",
+    "Topic :: Scientific/Engineering",
 ]
-dependencies = ["numpy"]  # if any
+keywords = ["kalman", "filter", "smoother", "state-space", "time-series"]
+dependencies = ["numpy"]
+
+[project.urls]
+Homepage = "https://github.com/odenpetersen/largekalman"
+Repository = "https://github.com/odenpetersen/largekalman"
+
+[project.optional-dependencies]
+dev = ["pytest", "build", "twine"]
+
+[tool.setuptools]
+packages = ["largekalman"]
+
+[tool.setuptools.package-data]
+largekalman = ["*.c"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

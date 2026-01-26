@@ -5,6 +5,19 @@ __pycache__/
 
 # C extensions
 *.so
+*.dll
+*.dylib
+
+# Vim swap files
+*.swp
+.*.swp
+
+# Claude Code
+.claude/
+
+# Temporary test directories
+tmp/
+tmp_*/
 
 # Distribution / packaging
 .Python
