@@ -24,46 +24,6 @@ def generate_data(F, Q, H, R, T, seed=42):
     return observations
 
 
-def em_step(tmp_folder, F, Q, H, R, observations):
-    """Run one EM iteration: E-step (smoothing) + M-step (parameter update)."""
-    n_latents = F.shape[0]
-    n_obs = H.shape[0]
-
-    gen, stats = largekalman.smooth(
-        tmp_folder, F.tolist(), Q.tolist(), H.tolist(), R.tolist(),
-        iter(observations), store_observations=False
-    )
-    list(gen)  # Consume generator
-
-    n = stats['num_datapoints']
-
-    # Reshape statistics into matrices
-    latents_cov_sum = np.array(stats['latents_cov_sum']).reshape(n_latents, n_latents)
-    latents_cov_lag1_sum = np.array(stats['latents_cov_lag1_sum']).reshape(n_latents, n_latents)
-
-    # M-step
-    E_xx = latents_cov_sum / n
-    E_xx_lag1 = latents_cov_lag1_sum / (n - 1)
-
-    F_new = E_xx_lag1 @ np.linalg.inv(E_xx)
-
-    # Ensure spectral radius < 1
-    eigvals = np.linalg.eigvals(F_new)
-    max_eig = np.max(np.abs(eigvals))
-    if max_eig > 0.99:
-        F_new = F_new * (0.99 / max_eig)
-
-    Q_new = E_xx - E_xx_lag1 @ F_new.T
-    Q_new = (Q_new + Q_new.T) / 2
-
-    # Ensure positive definite
-    eigvals, eigvecs = np.linalg.eigh(Q_new)
-    eigvals = np.clip(eigvals, 1e-4, None)
-    Q_new = eigvecs @ np.diag(eigvals) @ eigvecs.T
-
-    return F_new, Q_new
-
-
 def test_em_single_step(tmp_folder):
     """Test that a single EM step runs without error."""
     F = np.array([[0.9, 0.1], [0.0, 0.9]])
@@ -73,7 +33,9 @@ def test_em_single_step(tmp_folder):
 
     observations = generate_data(F, Q, H, R, T=50)
 
-    F_new, Q_new = em_step(tmp_folder, F, Q, H, R, observations)
+    F_new, Q_new, H_new, R_new, stats = largekalman.em_step(
+        tmp_folder, F, Q, H, R, observations
+    )
 
     # Check outputs are valid
     assert F_new.shape == F.shape
@@ -90,30 +52,75 @@ def test_em_convergence(tmp_folder):
     """Test that EM converges to reasonable parameters."""
     F_true = np.array([[0.9, 0.1], [0.0, 0.9]])
     Q_true = np.array([[0.1, 0.05], [0.05, 0.1]])
-    H = np.eye(2)
-    R = np.eye(2)
+    H_true = np.eye(2)
+    R_true = np.eye(2)
 
-    observations = generate_data(F_true, Q_true, H, R, T=100)
+    observations = generate_data(F_true, Q_true, H_true, R_true, T=100)
 
-    # Start from true parameters
-    F = F_true.copy()
-    Q = Q_true.copy()
-
-    # Run a few EM iterations
-    for i in range(5):
-        # Clean tmp folder between iterations
-        shutil.rmtree(tmp_folder)
-        os.makedirs(tmp_folder)
-
-        F, Q = em_step(tmp_folder, F, Q, H, R, observations)
+    # Run EM with fixed H
+    params, history = largekalman.em(
+        tmp_folder,
+        observations,
+        n_latents=2,
+        n_iters=5,
+        init_params={'F': F_true, 'Q': Q_true, 'H': H_true, 'R': R_true},
+        fixed_params={'H'},
+    )
 
     # Parameters should stay close to true values
-    F_error = np.linalg.norm(F - F_true)
-    Q_error = np.linalg.norm(Q - Q_true)
+    F_error = np.linalg.norm(params['F'] - F_true)
+    Q_error = np.linalg.norm(params['Q'] - Q_true)
 
     # Allow some deviation due to finite sample
     assert F_error < 0.5, f"F error too large: {F_error}"
     assert Q_error < 0.5, f"Q error too large: {Q_error}"
+
+
+def test_em_function(tmp_folder):
+    """Test the main em() function."""
+    F_true = np.array([[0.9, 0.0], [0.0, 0.9]])
+    Q_true = np.array([[0.1, 0.0], [0.0, 0.1]])
+    H_true = np.eye(2)
+    R_true = np.eye(2) * 0.5
+
+    observations = generate_data(F_true, Q_true, H_true, R_true, T=100)
+
+    # Fix H=I for identifiability (common practice)
+    # Provide good initial parameters
+    params, history = largekalman.em(
+        tmp_folder,
+        observations,
+        n_latents=2,
+        n_iters=10,
+        init_params={
+            'F': np.eye(2) * 0.8,
+            'Q': np.eye(2) * 0.1,
+            'H': H_true,
+            'R': np.eye(2) * 0.5,
+        },
+        fixed_params={'H'},
+    )
+
+    # Check that we got valid parameters
+    assert params['F'].shape == (2, 2)
+    assert params['Q'].shape == (2, 2)
+    assert params['H'].shape == (2, 2)
+    assert params['R'].shape == (2, 2)
+
+    # Check no NaN
+    assert not np.any(np.isnan(params['F']))
+    assert not np.any(np.isnan(params['Q']))
+    assert not np.any(np.isnan(params['R']))
+
+    # Check history
+    assert len(history) == 10
+
+    # Q and R should be positive definite
+    assert np.all(np.linalg.eigvalsh(params['Q']) > 0)
+    assert np.all(np.linalg.eigvalsh(params['R']) > 0)
+
+    # H should be unchanged
+    np.testing.assert_array_equal(params['H'], H_true)
 
 
 def test_sufficient_stats_consistency(tmp_folder):

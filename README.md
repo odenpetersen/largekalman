@@ -89,20 +89,51 @@ The `stats` dictionary contains:
 
 ## EM Parameter Estimation
 
-The sufficient statistics enable EM updates for learning model parameters:
+Use the built-in `em` function to learn model parameters from data:
 
 ```python
-import numpy as np
+import largekalman
 
-# After smoothing
-n = stats['num_datapoints']
-E_xx = np.array(stats['latents_cov_sum']).reshape(n_latents, n_latents) / n
-E_xx_lag1 = np.array(stats['latents_cov_lag1_sum']).reshape(n_latents, n_latents) / (n - 1)
+# Fit parameters using EM
+params, history = largekalman.em(
+    'tmp_folder',
+    observations,
+    n_latents=2,
+    n_iters=20,
+    verbose=True
+)
 
-# M-step updates
-F_new = E_xx_lag1 @ np.linalg.inv(E_xx)
-Q_new = E_xx - E_xx_lag1 @ F_new.T
+print(f"Fitted F:\n{params['F']}")
+print(f"Fitted Q:\n{params['Q']}")
+print(f"Fitted H:\n{params['H']}")
+print(f"Fitted R:\n{params['R']}")
 ```
+
+### `em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20, init_params=None, fixed_params=None, verbose=False)`
+
+Fit Kalman filter parameters using Expectation-Maximization.
+
+**Parameters:**
+- `tmp_folder`: Path to folder for temporary files
+- `observations`: List of observation vectors
+- `n_latents`: Number of latent dimensions
+- `n_obs`: Number of observation dimensions (inferred from data if None)
+- `n_iters`: Number of EM iterations
+- `init_params`: Optional dict with initial parameters `{'F', 'Q', 'H', 'R'}`
+- `fixed_params`: Optional set of parameter names to hold fixed, e.g. `{'H', 'R'}`
+- `verbose`: Print progress if True
+
+**Returns:**
+- `params`: Dict with fitted parameters `{'F', 'Q', 'H', 'R'}`
+- `history`: List of parameter dicts from each iteration
+
+### `em_step(tmp_folder, F, Q, H, R, observations)`
+
+Run a single EM iteration for custom control over the optimization.
+
+**Returns:**
+- `F_new, Q_new, H_new, R_new`: Updated parameters as numpy arrays
+- `stats`: Sufficient statistics from the E-step
 
 ## License
 
