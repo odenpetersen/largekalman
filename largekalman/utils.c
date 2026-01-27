@@ -93,6 +93,9 @@ void vector_minusequals(float *A, float *B, int n) {
 
 void solve(float *A, float *B, int n, int m) {
 	// Gaussian elimination with partial pivoting
+	// Handles singular/near-singular matrices by using regularization
+	const float eps = 1e-10f;
+
 	for (int k = 0; k < n; k++) {
 		// Find pivot
 		int max_row = k;
@@ -118,8 +121,15 @@ void solve(float *A, float *B, int n, int m) {
 			}
 		}
 
+		// Regularize if pivot is too small
+		float pivot = A[k*n+k];
+		if (fabsf(pivot) < eps) {
+			A[k*n+k] = (pivot >= 0) ? eps : -eps;
+			pivot = A[k*n+k];
+		}
+
 		for (int i = k+1; i < n; i++) {
-			float factor = A[i*n+k] / A[k*n+k];
+			float factor = A[i*n+k] / pivot;
 			for (int j = k; j < n; j++) {
 				A[i*n+j] -= factor * A[k*n+j];
 			}
@@ -132,8 +142,12 @@ void solve(float *A, float *B, int n, int m) {
 
 	// Back-substitution
 	for (int k = n-1; k >= 0; k--) {
+		float pivot = A[k*n+k];
+		if (fabsf(pivot) < eps) {
+			pivot = (pivot >= 0) ? eps : -eps;
+		}
 		for (int j = 0; j < m; j++) {
-			B[k*m+j] /= A[k*n+k];
+			B[k*m+j] /= pivot;
 		}
 		for (int i = 0; i < k; i++) {
 			for (int j = 0; j < m; j++) {
