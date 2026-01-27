@@ -5,6 +5,7 @@ Kalman filtering and smoothing for larger-than-memory datasets.
 ## Features
 
 - **Memory-efficient**: Processes data in batches, writing intermediate results to disk
+- **In-memory mode**: For small datasets, use `tmp_folder=None` to skip disk I/O
 - **RTS Smoother**: Full Rauch-Tung-Striebel smoothing with lag-1 covariance
 - **Sufficient statistics**: Returns statistics needed for EM parameter estimation
 - **Non-square observation matrices**: Supports observation dimension different from latent dimension
@@ -56,6 +57,22 @@ print(f"Sum of E[x_t x_t^T]: {stats['latents_cov_sum']}")
 print(f"Sum of E[x_{t+1} x_t^T]: {stats['latents_cov_lag1_sum']}")
 ```
 
+## In-Memory Mode
+
+For small datasets that fit in RAM, you can skip disk I/O by passing `tmp_folder=None`:
+
+```python
+# In-memory mode (no temporary files)
+generator, stats = largekalman.smooth(
+    None,  # No temp folder = in-memory mode
+    F, Q, H, R,
+    iter(observations)
+)
+
+for mu, cov, lag1_cov in generator:
+    print(f"Smoothed mean: {mu}")
+```
+
 ## API Reference
 
 ### `smooth(tmp_folder, F, Q, H, R, observations_iter, store_observations=True, batch_size=10000)`
@@ -63,14 +80,14 @@ print(f"Sum of E[x_{t+1} x_t^T]: {stats['latents_cov_lag1_sum']}")
 Run Kalman filter forward pass followed by RTS smoother backward pass.
 
 **Parameters:**
-- `tmp_folder`: Path to folder for temporary files (created if doesn't exist)
+- `tmp_folder`: Path to folder for temporary files, or `None` for in-memory mode
 - `F`: Transition matrix (n_latents x n_latents)
 - `Q`: Process noise covariance (n_latents x n_latents)
 - `H`: Observation matrix (n_obs x n_latents)
 - `R`: Observation noise covariance (n_obs x n_obs)
 - `observations_iter`: Iterator over observation vectors
-- `store_observations`: If False, delete observations file after processing
-- `batch_size`: Number of timesteps to process at once
+- `store_observations`: If False, delete observations file after processing (disk mode only)
+- `batch_size`: Number of timesteps to process at once (disk mode only)
 
 **Returns:**
 - `generator`: Yields `(mu, cov, lag1_cov)` tuples for each timestep

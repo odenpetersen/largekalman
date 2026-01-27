@@ -2,6 +2,7 @@ import os
 import itertools
 import ctypes
 import array
+import numpy as np
 
 _here = os.path.dirname(__file__)
 lib = ctypes.CDLL(os.path.join(_here, "libfilter.so"))
@@ -159,7 +160,123 @@ def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observat
     return forwards_file, backwards_file, stats
 
 
+def _smooth_memory(F, Q, H, R, observations):
+    """In-memory Kalman smoother for small datasets."""
+    observations = [np.array(obs) for obs in observations]
+    F, Q, H, R = np.array(F), np.array(Q), np.array(H), np.array(R)
+    n_latents = F.shape[0]
+    n_obs = H.shape[0]
+    T = len(observations)
+
+    # Forward pass - store filtered means and covariances
+    mus = []
+    covs = []
+
+    for t, y in enumerate(observations):
+        if t == 0:
+            # Initialize from first observation
+            HHT = H @ H.T
+            mu = H.T @ np.linalg.solve(HHT, y)
+            cov = np.zeros((n_latents, n_latents))
+        else:
+            # Predict
+            mu_pred = F @ mus[-1]
+            cov_pred = F @ covs[-1] @ F.T + Q
+            # Update
+            S = H @ cov_pred @ H.T + R
+            K = cov_pred @ H.T @ np.linalg.solve(S, np.eye(n_obs))
+            mu = mu_pred + K @ (y - H @ mu_pred)
+            cov = cov_pred - K @ H @ cov_pred
+        mus.append(mu)
+        covs.append(cov)
+
+    # Backward pass - RTS smoother
+    results = []
+
+    # Initialize sufficient statistics
+    stats = {
+        'latents_mu_sum': np.zeros(n_latents),
+        'latents_cov_sum': np.zeros((n_latents, n_latents)),
+        'latents_cov_lag1_sum': np.zeros((n_latents, n_latents)),
+        'obs_sum': np.zeros(n_obs),
+        'obs_obs_sum': np.zeros((n_obs, n_obs)),
+        'obs_latents_sum': np.zeros((n_obs, n_latents)),
+    }
+
+    # Last timestep: smoothed = filtered
+    mu_smooth = mus[-1].copy()
+    cov_smooth = covs[-1].copy()
+    lag1_cov = np.zeros((n_latents, n_latents))
+    results.append((mu_smooth.copy(), cov_smooth.copy(), lag1_cov.copy()))
+
+    # Accumulate stats for last timestep
+    y = observations[-1]
+    stats['latents_mu_sum'] += mu_smooth
+    stats['latents_cov_sum'] += cov_smooth + np.outer(mu_smooth, mu_smooth)
+    stats['obs_sum'] += y
+    stats['obs_obs_sum'] += np.outer(y, y)
+    stats['obs_latents_sum'] += np.outer(y, mu_smooth)
+
+    # Backward iteration
+    for t in range(T - 2, -1, -1):
+        mu, cov = mus[t], covs[t]
+        mu_pred = F @ mu
+        cov_pred = F @ cov @ F.T + Q
+
+        # RTS gain: G = cov @ F.T @ inv(cov_pred)
+        G = cov @ F.T @ np.linalg.inv(cov_pred)
+
+        # Smoothed estimates
+        mu_smooth_new = mu + G @ (mu_smooth - mu_pred)
+        cov_smooth_new = cov + G @ (cov_smooth - cov_pred) @ G.T
+
+        # Lag-1 covariance: E[x_{t+1} x_t^T]
+        lag1_cov = cov_smooth @ G.T + np.outer(mu_smooth, mu_smooth_new)
+
+        mu_smooth, cov_smooth = mu_smooth_new, cov_smooth_new
+        results.append((mu_smooth.copy(), cov_smooth.copy(), lag1_cov.copy()))
+
+        # Accumulate stats
+        y = observations[t]
+        stats['latents_mu_sum'] += mu_smooth
+        stats['latents_cov_sum'] += cov_smooth + np.outer(mu_smooth, mu_smooth)
+        stats['latents_cov_lag1_sum'] += lag1_cov
+        stats['obs_sum'] += y
+        stats['obs_obs_sum'] += np.outer(y, y)
+        stats['obs_latents_sum'] += np.outer(y, mu_smooth)
+
+    # Results are in reverse order
+    results = results[::-1]
+
+    # Convert stats to lists (match disk-based format)
+    stats_out = {
+        'n_obs': n_obs,
+        'n_latents': n_latents,
+        'num_datapoints': T,
+        'latents_mu_sum': stats['latents_mu_sum'].tolist(),
+        'latents_cov_sum': stats['latents_cov_sum'].flatten().tolist(),
+        'latents_cov_lag1_sum': stats['latents_cov_lag1_sum'].flatten().tolist(),
+        'obs_sum': stats['obs_sum'].tolist(),
+        'obs_obs_sum': stats['obs_obs_sum'].flatten().tolist(),
+        'obs_latents_sum': stats['obs_latents_sum'].flatten().tolist(),
+    }
+
+    def gen():
+        for mu, cov, lag1 in results:
+            yield mu.tolist(), cov.tolist(), lag1.tolist()
+
+    return gen(), stats_out
+
+
 def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True, batch_size=10000):
+    # In-memory mode when tmp_folder is None
+    if tmp_folder_path is None:
+        if observations_iter is None:
+            raise ValueError("observations_iter required for in-memory mode")
+        observations = list(observations_iter)
+        return _smooth_memory(F, Q, H, R, observations)
+
+    # Disk-based mode
     forwards_file, backwards_file, stats = write_files(tmp_folder_path, F,Q,H,R, observations_iter,
                                                         store_observations=store_observations)
     n_latents = len(Q)
