@@ -6,7 +6,7 @@ from .filter import smooth
 
 
 def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
-       init_params=None, fixed_params=None, verbose=False):
+       init_params=None, fixed='H', verbose=False):
     """Fit Kalman filter parameters using Expectation-Maximization.
 
     Args:
@@ -16,7 +16,8 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
         n_obs: Number of observation dimensions (inferred from data if None)
         n_iters: Number of EM iterations
         init_params: Optional dict with initial parameters {'F', 'Q', 'H', 'R'}
-        fixed_params: Optional set of parameter names to hold fixed, e.g. {'H', 'R'}
+        fixed: String of parameter names to hold fixed, e.g. 'H' or 'HR'.
+               At least one parameter must be fixed for identifiability.
         verbose: Print progress if True
 
     Returns:
@@ -30,8 +31,15 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
     if n_obs is None:
         n_obs = len(observations[0])
 
-    if fixed_params is None:
-        fixed_params = set()
+    # Parse fixed params string
+    valid_params = {'F', 'Q', 'H', 'R'}
+    fixed_params = set(fixed.upper()) if fixed else set()
+    invalid = fixed_params - valid_params
+    if invalid:
+        raise ValueError(f"Invalid parameter names in fixed='{fixed}': {invalid}. Valid: F, Q, H, R")
+    if len(fixed_params) == 0:
+        raise ValueError("Model is not identifiable: at least one parameter must be fixed. "
+                         "Use fixed='H' (most common) or fixed='Q' to constrain the model.")
 
     # Initialize parameters
     if init_params is not None:

@@ -57,14 +57,13 @@ def test_em_convergence(tmp_folder):
 
     observations = generate_data(F_true, Q_true, H_true, R_true, T=100)
 
-    # Run EM with fixed H
+    # Run EM with fixed H (default)
     params, history = largekalman.em(
         tmp_folder,
         observations,
         n_latents=2,
         n_iters=5,
         init_params={'F': F_true, 'Q': Q_true, 'H': H_true, 'R': R_true},
-        fixed_params={'H'},
     )
 
     # Parameters should stay close to true values
@@ -85,8 +84,7 @@ def test_em_function(tmp_folder):
 
     observations = generate_data(F_true, Q_true, H_true, R_true, T=100)
 
-    # Fix H=I for identifiability (common practice)
-    # Provide good initial parameters
+    # H fixed by default for identifiability
     params, history = largekalman.em(
         tmp_folder,
         observations,
@@ -98,7 +96,6 @@ def test_em_function(tmp_folder):
             'H': H_true,
             'R': np.eye(2) * 0.5,
         },
-        fixed_params={'H'},
     )
 
     # Check that we got valid parameters
@@ -121,6 +118,14 @@ def test_em_function(tmp_folder):
 
     # H should be unchanged
     np.testing.assert_array_equal(params['H'], H_true)
+
+
+def test_em_identifiability_error(tmp_folder):
+    """Test that EM raises error when no parameters are fixed."""
+    observations = [[[1.0, 2.0], [2.0, 3.0]]]
+
+    with pytest.raises(ValueError, match="not identifiable"):
+        largekalman.em(tmp_folder, observations, n_latents=2, fixed='')
 
 
 def test_sufficient_stats_consistency(tmp_folder):

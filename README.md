@@ -94,7 +94,7 @@ Use the built-in `em` function to learn model parameters from data:
 ```python
 import largekalman
 
-# Fit parameters using EM
+# Fit parameters using EM (H fixed by default for identifiability)
 params, history = largekalman.em(
     'tmp_folder',
     observations,
@@ -105,11 +105,13 @@ params, history = largekalman.em(
 
 print(f"Fitted F:\n{params['F']}")
 print(f"Fitted Q:\n{params['Q']}")
-print(f"Fitted H:\n{params['H']}")
 print(f"Fitted R:\n{params['R']}")
+
+# Fix multiple parameters
+params, _ = largekalman.em('tmp', obs, n_latents=2, fixed='HR')
 ```
 
-### `em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20, init_params=None, fixed_params=None, verbose=False)`
+### `em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20, init_params=None, fixed='H', verbose=False)`
 
 Fit Kalman filter parameters using Expectation-Maximization.
 
@@ -120,7 +122,7 @@ Fit Kalman filter parameters using Expectation-Maximization.
 - `n_obs`: Number of observation dimensions (inferred from data if None)
 - `n_iters`: Number of EM iterations
 - `init_params`: Optional dict with initial parameters `{'F', 'Q', 'H', 'R'}`
-- `fixed_params`: Optional set of parameter names to hold fixed, e.g. `{'H', 'R'}`
+- `fixed`: String of parameters to hold fixed, e.g. `'H'` or `'HR'`. Required for identifiability.
 - `verbose`: Print progress if True
 
 **Returns:**
