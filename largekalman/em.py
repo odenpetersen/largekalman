@@ -123,9 +123,9 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
             except np.linalg.LinAlgError:
                 pass  # Keep previous H
 
-        # Update R: R = E[y y^T] - H @ E[x y^T]
+        # Update R: R = E[(y - Hx)(y - Hx)^T] = E[yy^T] - H E[xy^T] - E[yx^T] H^T + H E[xx^T] H^T
         if 'R' not in fixed_params:
-            R_new = E_yy - H @ E_yx.T
+            R_new = E_yy - H @ E_yx.T - E_yx @ H.T + H @ E_xx @ H.T
             R_new = (R_new + R_new.T) / 2  # Symmetrize
             if not np.any(np.isnan(R_new)):
                 # Ensure positive definite
@@ -216,8 +216,8 @@ def em_step(tmp_folder, F, Q, H, R, observations):
     # H
     H_new = E_yx @ np.linalg.inv(E_xx)
 
-    # R
-    R_new = E_yy - H_new @ E_yx.T
+    # R = E[(y - Hx)(y - Hx)^T]
+    R_new = E_yy - H_new @ E_yx.T - E_yx @ H_new.T + H_new @ E_xx @ H_new.T
     R_new = (R_new + R_new.T) / 2
     eigvals, eigvecs = np.linalg.eigh(R_new)
     eigvals = np.clip(eigvals, 1e-6, None)
