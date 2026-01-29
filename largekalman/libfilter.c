@@ -261,11 +261,61 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 				matmul_transposed(obs,KT,latents_update,1,n_obs,n_latents);
 				vector_plusequals(latents_mu,latents_update,n_latents);
 				free(latents_update);
-				//P <- P - HP^T @ KT (where KT = S^{-1} @ HP)
-				float *KHP = malloc(n_latents*n_latents*sizeof(float));
-				matmul_left_transposed(HP,KT,KHP, n_latents, n_obs, n_latents);
-				vector_minusequals(latents_cov,KHP,n_latents*n_latents);
-				free(KHP);
+				// Joseph form for numerical stability:
+				// P = (I - K@H) @ P @ (I - K@H)^T + K @ R @ K^T
+				// First compute K from KT (K = KT^T)
+				float *K = malloc(n_latents*n_obs*sizeof(float));
+				for (int i = 0; i < n_latents; i++) {
+					for (int j = 0; j < n_obs; j++) {
+						K[i*n_obs+j] = KT[j*n_latents+i];
+					}
+				}
+
+				// Compute I - K@H (n_latents x n_latents)
+				float *IKH = malloc(n_latents*n_latents*sizeof(float));
+				matmul(K, H, IKH, n_latents, n_obs, n_latents);
+				for (int i = 0; i < n_latents; i++) {
+					for (int j = 0; j < n_latents; j++) {
+						if (i == j) {
+							IKH[i*n_latents+j] = 1.0f - IKH[i*n_latents+j];
+						} else {
+							IKH[i*n_latents+j] = -IKH[i*n_latents+j];
+						}
+					}
+				}
+
+				// Compute (I - K@H) @ P
+				float *IKHP = malloc(n_latents*n_latents*sizeof(float));
+				matmul(IKH, latents_cov, IKHP, n_latents, n_latents, n_latents);
+
+				// Compute (I - K@H) @ P @ (I - K@H)^T
+				float *P_joseph = malloc(n_latents*n_latents*sizeof(float));
+				matmul_transposed(IKHP, IKH, P_joseph, n_latents, n_latents, n_latents);
+
+				// Compute K @ R
+				float *KR = malloc(n_latents*n_obs*sizeof(float));
+				matmul(K, R, KR, n_latents, n_obs, n_obs);
+
+				// Compute K @ R @ K^T and add to P_joseph
+				float *KRKT = malloc(n_latents*n_latents*sizeof(float));
+				matmul_transposed(KR, K, KRKT, n_latents, n_obs, n_latents);
+				vector_plusequals(P_joseph, KRKT, n_latents*n_latents);
+
+				// Symmetrize and copy back
+				for (int i = 0; i < n_latents; i++) {
+					for (int j = 0; j <= i; j++) {
+						float sym = 0.5f * (P_joseph[i*n_latents+j] + P_joseph[j*n_latents+i]);
+						latents_cov[i*n_latents+j] = sym;
+						latents_cov[j*n_latents+i] = sym;
+					}
+				}
+
+				free(K);
+				free(IKH);
+				free(IKHP);
+				free(P_joseph);
+				free(KR);
+				free(KRKT);
 				free(KT);
 				free(HP);
 			}
@@ -567,15 +617,7 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 				   latents_cov_lag1,
 				   n_latents, n_latents, n_latents);
 
-			memcpy(latents_mu_smoothed_next,
-				   latents_mu_smoothed,
-				   sizeof(float) * n_latents);
-			memcpy(latents_cov_smoothed_next,
-				   latents_cov_smoothed,
-				   sizeof(float) * n_latents * n_latents);
-
-
-			//Sufficient statistics
+			//Sufficient statistics (computed BEFORE updating _next variables)
 			vector_plusequals(stats->latents_mu_sum, latents_mu_smoothed, n_latents);
 
 			// E[x_t x_t^T] = P_t + mu_t @ mu_t^T
@@ -584,9 +626,26 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 			vector_plusequals(stats->latents_cov_sum, mu_outer, n_latents*n_latents);
 
 			// E[x_{t+1} x_t^T] = Cov(x_{t+1}, x_t) + mu_{t+1} @ mu_t^T
-			vector_plusequals(stats->latents_cov_lag1_sum, latents_cov_lag1, n_latents*n_latents);
+			// Note: latents_cov_lag1 = G @ P_{t+1|T} = Cov(x_t, x_{t+1}|Y), need to transpose
+			// latents_mu_smoothed_next still contains mu_{t+1|T} at this point
+			float *lag1_transposed = malloc(n_latents * n_latents * sizeof(float));
+			for (int i = 0; i < n_latents; i++) {
+				for (int j = 0; j < n_latents; j++) {
+					lag1_transposed[i * n_latents + j] = latents_cov_lag1[j * n_latents + i];
+				}
+			}
+			vector_plusequals(stats->latents_cov_lag1_sum, lag1_transposed, n_latents*n_latents);
+			free(lag1_transposed);
 			matmul_transposed(latents_mu_smoothed_next, latents_mu_smoothed, mu_cross, n_latents, 1, n_latents);
 			vector_plusequals(stats->latents_cov_lag1_sum, mu_cross, n_latents*n_latents);
+
+			// NOW update _next variables for the next iteration
+			memcpy(latents_mu_smoothed_next,
+				   latents_mu_smoothed,
+				   sizeof(float) * n_latents);
+			memcpy(latents_cov_smoothed_next,
+				   latents_cov_smoothed,
+				   sizeof(float) * n_latents * n_latents);
 
 			// Observation statistics
 			float *obs = &obs_buffer[b * n_obs];

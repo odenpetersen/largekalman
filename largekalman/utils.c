@@ -24,6 +24,10 @@ void write_floats(const float *floats, int n, void *handle) {
 	fwrite(floats, sizeof(float), n, handle);
 }
 
+void write_doubles(const double *doubles, int n, void *handle) {
+	fwrite(doubles, sizeof(double), n, handle);
+}
+
 int *read_ints(int n, void *handle) {
 	int *ints = malloc(sizeof(int) * n);
 	fread(ints, sizeof(int), n, handle);

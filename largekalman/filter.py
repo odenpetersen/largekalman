@@ -283,20 +283,49 @@ def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=
     record_size = n_latents + 2 * n_latents * n_latents  # mu + cov + lag1_cov
     record_bytes = record_size * 4
 
+    # The backwards file contains records in reverse chronological order (T-1, T-2, ..., 0).
+    # We need to reverse it to yield in chronological order (0, 1, ..., T-1).
+    # Write to a new file in chronological order by reading backwards file from end to start.
+    chronological_file = os.path.join(tmp_folder_path, 'chronological.bin')
+
+    with open(backwards_file, 'rb') as f_in, open(chronological_file, 'wb') as f_out:
+        f_in.seek(0, 2)
+        file_size = f_in.tell()
+        num_records = file_size // record_bytes
+
+        # Read from end to beginning, write in that order (which is chronological)
+        records_written = 0
+        while records_written < num_records:
+            batch_records = min(batch_size, num_records - records_written)
+            # Seek to position: read the batch that's (records_written + batch_records) from the end
+            f_in.seek(file_size - (records_written + batch_records) * record_bytes)
+            data = array.array('f')
+            data.fromfile(f_in, batch_records * record_size)
+
+            # Reverse the batch before writing
+            reversed_data = array.array('f')
+            for i in range(batch_records - 1, -1, -1):
+                offset = i * record_size
+                reversed_data.extend(data[offset:offset + record_size])
+
+            reversed_data.tofile(f_out)
+            records_written += batch_records
+
+    # Remove backwards file, keep chronological
+    os.remove(backwards_file)
+
     def gen():
-        with open(backwards_file, 'rb') as f:
-            f.seek(0, 2)
-            file_size = f.tell()
+        with open(chronological_file, 'rb') as f:
+            records_read = 0
+            file_size = os.path.getsize(chronological_file)
             num_records = file_size // record_bytes
 
-            records_read = 0
             while records_read < num_records:
                 batch_records = min(batch_size, num_records - records_read)
-                f.seek(file_size - (records_read + batch_records) * record_bytes)
                 data = array.array('f')
                 data.fromfile(f, batch_records * record_size)
 
-                for i in range(batch_records - 1, -1, -1):
+                for i in range(batch_records):
                     offset = i * record_size
                     mu = data[offset:offset+n_latents].tolist()
                     cov = [data[offset+n_latents+j*n_latents:offset+n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
@@ -305,6 +334,6 @@ def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=
                 records_read += batch_records
 
         os.remove(forwards_file)
-        os.remove(backwards_file)
+        os.remove(chronological_file)
 
     return gen(), stats
