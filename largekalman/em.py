@@ -78,7 +78,7 @@ def _m_step(stats, n_latents, n_obs, F, Q, H, R, fixed_params):
     return F, Q, H, R
 
 
-def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, fixed=None):
+def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, fixed=None, batch_size=10000):
     """Run a single EM iteration.
 
     Args:
@@ -87,6 +87,7 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
         observations: List of observation vectors (mutually exclusive with observations_file)
         observations_file: Path to pre-written observations file (mutually exclusive with observations)
         fixed: String of parameter names to hold fixed (e.g. 'H' or 'HR'), or None to update all
+        batch_size: Buffer size for file I/O operations
 
     Returns:
         F_new, Q_new, H_new, R_new: Updated parameters as numpy arrays
@@ -123,10 +124,10 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
     write_params(F.tolist(), Q.tolist(), H.tolist(), R.tolist(), params_file)
 
     forwards_file = os.path.join(tmp_folder, 'forwards.bin')
-    write_forwards(obs_file, forwards_file, params_file)
+    write_forwards(obs_file, forwards_file, params_file, buffer_size=batch_size)
 
     backwards_file = os.path.join(tmp_folder, 'backwards.bin')
-    stats = write_backwards(params_file, obs_file, forwards_file, backwards_file)
+    stats = write_backwards(params_file, obs_file, forwards_file, backwards_file, buffer_size=batch_size)
 
     # Cleanup intermediate files (but not observations if it was pre-existing)
     os.remove(params_file)
@@ -142,7 +143,7 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
 
 
 def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
-       init_params=None, fixed='H', verbose=False):
+       init_params=None, fixed='H', verbose=False, batch_size=10000):
     """Fit Kalman filter parameters using Expectation-Maximization.
 
     Args:
@@ -155,6 +156,7 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
         fixed: String of parameter names to hold fixed, e.g. 'H' or 'HR'.
                At least one parameter must be fixed for identifiability.
         verbose: Print progress if True
+        batch_size: Buffer size for file I/O operations
 
     Returns:
         params: Dict with fitted parameters {'F', 'Q', 'H', 'R'}
@@ -208,7 +210,8 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
         F, Q, H, R, stats = em_step(
             tmp_folder, F, Q, H, R,
             observations_file=observations_file,
-            fixed=fixed
+            fixed=fixed,
+            batch_size=batch_size
         )
 
         # Store history
