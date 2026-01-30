@@ -133,7 +133,6 @@ def write_params(F,Q,H,R,params_file):
     lib.write_floats(ptr, len(params_array), c_params_file)
 
     lib.close_file(c_params_file)
-    print(f'wrote to {params_file=}')
 
 def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True):
     if not os.path.exists(tmp_folder_path):
@@ -143,14 +142,12 @@ def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observat
     if observations_iter is not None:
         write_observations(observations_iter, observations_file)
 
-    print('writing params')
     params_file = f"{tmp_folder_path}/params.bin"
     write_params(F,Q,H,R,params_file)
 
     forwards_file = f"{tmp_folder_path}/forwards.bin"
     write_forwards(observations_file, forwards_file, params_file)
 
-    print('write backwards')
     backwards_file = f"{tmp_folder_path}/backwards.bin"
     stats = write_backwards(params_file, observations_file, forwards_file, backwards_file)
 
@@ -160,7 +157,7 @@ def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observat
     return forwards_file, backwards_file, stats
 
 
-def _smooth_memory(F, Q, H, R, observations):
+def _smooth_memory(F, Q, H, R, observations, return_filtered=False):
     """In-memory Kalman smoother for small datasets."""
     observations = [np.array(obs) for obs in observations]
     F, Q, H, R = np.array(F), np.array(Q), np.array(H), np.array(R)
@@ -207,7 +204,7 @@ def _smooth_memory(F, Q, H, R, observations):
     mu_smooth = mus[-1].copy()
     cov_smooth = covs[-1].copy()
     lag1_cov = np.zeros((n_latents, n_latents))
-    results.append((mu_smooth.copy(), cov_smooth.copy(), lag1_cov.copy()))
+    results.append((mu_smooth.copy(), cov_smooth.copy(), lag1_cov.copy(), mus[-1].copy()))
 
     # Accumulate stats for last timestep
     y = observations[-1]
@@ -234,7 +231,7 @@ def _smooth_memory(F, Q, H, R, observations):
         lag1_cov = cov_smooth @ G.T + np.outer(mu_smooth, mu_smooth_new)
 
         mu_smooth, cov_smooth = mu_smooth_new, cov_smooth_new
-        results.append((mu_smooth.copy(), cov_smooth.copy(), lag1_cov.copy()))
+        results.append((mu_smooth.copy(), cov_smooth.copy(), lag1_cov.copy(), mus[t].copy()))
 
         # Accumulate stats
         y = observations[t]
@@ -262,26 +259,31 @@ def _smooth_memory(F, Q, H, R, observations):
     }
 
     def gen():
-        for mu, cov, lag1 in results:
-            yield mu.tolist(), cov.tolist(), lag1.tolist()
+        for mu_smooth, cov_smooth, lag1, mu_filt in results:
+            if return_filtered:
+                yield mu_smooth.tolist(), cov_smooth.tolist(), lag1.tolist(), mu_filt.tolist()
+            else:
+                yield mu_smooth.tolist(), cov_smooth.tolist(), lag1.tolist()
 
     return gen(), stats_out
 
 
-def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True, batch_size=10000):
+def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True, batch_size=10000, return_filtered=False):
     # In-memory mode when tmp_folder is None
     if tmp_folder_path is None:
         if observations_iter is None:
             raise ValueError("observations_iter required for in-memory mode")
         observations = list(observations_iter)
-        return _smooth_memory(F, Q, H, R, observations)
+        return _smooth_memory(F, Q, H, R, observations, return_filtered=return_filtered)
 
     # Disk-based mode
     forwards_file, backwards_file, stats = write_files(tmp_folder_path, F,Q,H,R, observations_iter,
                                                         store_observations=store_observations)
     n_latents = len(Q)
-    record_size = n_latents + 2 * n_latents * n_latents  # mu + cov + lag1_cov
-    record_bytes = record_size * 4
+    smooth_record_size = n_latents + 2 * n_latents * n_latents  # mu + cov + lag1_cov
+    smooth_record_bytes = smooth_record_size * 4
+    filt_record_size = n_latents + n_latents * n_latents  # mu + cov
+    filt_record_bytes = filt_record_size * 4
 
     # The backwards file contains records in reverse chronological order (T-1, T-2, ..., 0).
     # We need to reverse it to yield in chronological order (0, 1, ..., T-1).
@@ -291,22 +293,22 @@ def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=
     with open(backwards_file, 'rb') as f_in, open(chronological_file, 'wb') as f_out:
         f_in.seek(0, 2)
         file_size = f_in.tell()
-        num_records = file_size // record_bytes
+        num_records = file_size // smooth_record_bytes
 
         # Read from end to beginning, write in that order (which is chronological)
         records_written = 0
         while records_written < num_records:
             batch_records = min(batch_size, num_records - records_written)
             # Seek to position: read the batch that's (records_written + batch_records) from the end
-            f_in.seek(file_size - (records_written + batch_records) * record_bytes)
+            f_in.seek(file_size - (records_written + batch_records) * smooth_record_bytes)
             data = array.array('f')
-            data.fromfile(f_in, batch_records * record_size)
+            data.fromfile(f_in, batch_records * smooth_record_size)
 
             # Reverse the batch before writing
             reversed_data = array.array('f')
             for i in range(batch_records - 1, -1, -1):
-                offset = i * record_size
-                reversed_data.extend(data[offset:offset + record_size])
+                offset = i * smooth_record_size
+                reversed_data.extend(data[offset:offset + smooth_record_size])
 
             reversed_data.tofile(f_out)
             records_written += batch_records
@@ -315,23 +317,45 @@ def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=
     os.remove(backwards_file)
 
     def gen():
-        with open(chronological_file, 'rb') as f:
-            records_read = 0
+        files_to_open = [open(chronological_file, 'rb')]
+        if return_filtered:
+            files_to_open.append(open(forwards_file, 'rb'))
+
+        try:
+            f_smooth = files_to_open[0]
+            f_filt = files_to_open[1] if return_filtered else None
+
             file_size = os.path.getsize(chronological_file)
-            num_records = file_size // record_bytes
+            num_records = file_size // smooth_record_bytes
+            records_read = 0
 
             while records_read < num_records:
                 batch_records = min(batch_size, num_records - records_read)
-                data = array.array('f')
-                data.fromfile(f, batch_records * record_size)
+
+                smooth_data = array.array('f')
+                smooth_data.fromfile(f_smooth, batch_records * smooth_record_size)
+
+                if return_filtered:
+                    filt_data = array.array('f')
+                    filt_data.fromfile(f_filt, batch_records * filt_record_size)
 
                 for i in range(batch_records):
-                    offset = i * record_size
-                    mu = data[offset:offset+n_latents].tolist()
-                    cov = [data[offset+n_latents+j*n_latents:offset+n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
-                    lag1_cov = [data[offset+n_latents+n_latents*n_latents+j*n_latents:offset+n_latents+n_latents*n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
-                    yield mu, cov, lag1_cov
+                    s_offset = i * smooth_record_size
+                    mu = smooth_data[s_offset:s_offset+n_latents].tolist()
+                    cov = [smooth_data[s_offset+n_latents+j*n_latents:s_offset+n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
+                    lag1_cov = [smooth_data[s_offset+n_latents+n_latents*n_latents+j*n_latents:s_offset+n_latents+n_latents*n_latents+(j+1)*n_latents].tolist() for j in range(n_latents)]
+
+                    if return_filtered:
+                        f_offset = i * filt_record_size
+                        filt_mu = filt_data[f_offset:f_offset+n_latents].tolist()
+                        yield mu, cov, lag1_cov, filt_mu
+                    else:
+                        yield mu, cov, lag1_cov
+
                 records_read += batch_records
+        finally:
+            for f in files_to_open:
+                f.close()
 
         os.remove(forwards_file)
         os.remove(chronological_file)
