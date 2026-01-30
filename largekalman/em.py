@@ -78,7 +78,8 @@ def _m_step(stats, n_latents, n_obs, F, Q, H, R, fixed_params):
     return F, Q, H, R
 
 
-def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, fixed=None, batch_size=10000):
+def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, fixed=None,
+            batch_size=10000, store_observations=True):
     """Run a single EM iteration.
 
     Args:
@@ -88,6 +89,7 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
         observations_file: Path to pre-written observations file (mutually exclusive with observations)
         fixed: String of parameter names to hold fixed (e.g. 'H' or 'HR'), or None to update all
         batch_size: Buffer size for file I/O operations
+        store_observations: If True (default), keep observations file for reuse
 
     Returns:
         F_new, Q_new, H_new, R_new: Updated parameters as numpy arrays
@@ -129,11 +131,11 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
     backwards_file = os.path.join(tmp_folder, 'backwards.bin')
     stats = write_backwards(params_file, obs_file, forwards_file, backwards_file, buffer_size=batch_size)
 
-    # Cleanup intermediate files (but not observations if it was pre-existing)
+    # Cleanup intermediate files
     os.remove(params_file)
     os.remove(forwards_file)
     os.remove(backwards_file)
-    if observations is not None:
+    if not store_observations and observations is not None:
         os.remove(obs_file)
 
     # M-step
@@ -143,7 +145,7 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
 
 
 def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
-       init_params=None, fixed='H', verbose=False, batch_size=10000):
+       init_params=None, fixed='H', verbose=False, batch_size=10000, store_observations=True):
     """Fit Kalman filter parameters using Expectation-Maximization.
 
     Args:
@@ -157,6 +159,7 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
                At least one parameter must be fixed for identifiability.
         verbose: Print progress if True
         batch_size: Buffer size for file I/O operations
+        store_observations: If True (default), keep observations file for reuse
 
     Returns:
         params: Dict with fitted parameters {'F', 'Q', 'H', 'R'}
@@ -229,7 +232,7 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
             print(f"  R diag: {np.diag(R)}")
 
     # Cleanup
-    if os.path.exists(tmp_folder):
+    if not store_observations and os.path.exists(tmp_folder):
         shutil.rmtree(tmp_folder)
 
     return {'F': F, 'Q': Q, 'H': H, 'R': R}, history

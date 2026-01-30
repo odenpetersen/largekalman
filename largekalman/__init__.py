@@ -3,5 +3,5 @@
 from .filter import smooth
 from .em import em, em_step
 
-__version__ = "0.2.8"
+__version__ = "0.2.9"
 __all__ = ["smooth", "em", "em_step"]
