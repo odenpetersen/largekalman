@@ -150,9 +150,9 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
 
     Args:
         tmp_folder: Path to folder for temporary files
-        observations: List of observation vectors (or iterator)
+        observations: Iterator or list of observation vectors (supports larger-than-memory)
         n_latents: Number of latent dimensions
-        n_obs: Number of observation dimensions (inferred from data if None)
+        n_obs: Number of observation dimensions (required if observations is an iterator)
         n_iters: Number of EM iterations
         init_params: Optional dict with initial parameters {'F', 'Q', 'H', 'R'}
         fixed: String of parameter names to hold fixed, e.g. 'H' or 'HR'.
@@ -165,12 +165,14 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
         params: Dict with fitted parameters {'F', 'Q', 'H', 'R'}
         history: List of parameter dicts from each iteration
     """
-    # Convert to list if iterator
-    if not isinstance(observations, list):
-        observations = list(observations)
-
+    # Infer n_obs if not provided
     if n_obs is None:
-        n_obs = len(observations[0])
+        if init_params is not None and 'H' in init_params:
+            n_obs = len(init_params['H'])
+        elif isinstance(observations, list) and len(observations) > 0:
+            n_obs = len(observations[0])
+        else:
+            raise ValueError("n_obs must be provided when observations is an iterator")
 
     # Parse fixed params string
     valid_params = {'F', 'Q', 'H', 'R'}
