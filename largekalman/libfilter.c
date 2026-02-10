@@ -320,19 +320,10 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 				free(HP);
 			}
 
-			//printf("latents_mu ");
-			for (int i = 0; i < n_latents; i++) {
-				//printf("%f ",latents_mu[i]);
-			}
-			//printf("\n");
-			//printf("latents_cov\n");
-			for (int i = 0; i < n_latents; i++) {
-				for (int j = 0; j < n_latents; j++) {
-					//printf("%f ",latents_cov[i*n_latents+j]);
-				}
-				//printf("\n");
-			}
-			//printf("\n");
+			// Check for NaN before writing
+			check_nan(latents_mu, n_latents, "latents_mu (forward)");
+			check_nan(latents_cov, n_latents*n_latents, "latents_cov (forward)");
+
 			fwrite(latents_mu, sizeof(float), n_latents, forw_file);
 			fwrite(latents_cov, sizeof(float), n_latents*n_latents, forw_file);
 		}
@@ -353,7 +344,6 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 
 //Backwards step
 SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FILE *backw_file, int buffer_size) {
-	//printf("calling write_backwards\n");
 	int param_header[6];
 	//fseek(param_file, 0, SEEK_SET);
 	fread(param_header, sizeof(int), 6, param_file);
@@ -565,6 +555,7 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 							  n_latents, n_latents, n_latents);
 			vector_plusequals(latents_cov_pred, Q,
 							  n_latents * n_latents);
+			check_nan(latents_cov_pred, n_latents*n_latents, "latents_cov_pred (after F@P@F'+Q)");
 
 			// RTS gain: G = P @ F^T @ P_pred^{-1}
 			// Compute as: tmp = F @ P, solve P_pred @ X = tmp, then G = X^T
@@ -575,6 +566,7 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 				   sizeof(float) * n_latents * n_latents);
 			solve(latents_cov_pred_copy, tmp,
 				  n_latents, n_latents);
+			check_nan(tmp, n_latents*n_latents, "tmp (after solve for G)");
 
 			// Transpose to get G = P @ F^T @ P_pred^{-1}
 			for (int i = 0; i < n_latents; i++) {
@@ -660,6 +652,11 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 			vector_plusequals(stats->obs_latents_sum, obs_latents, n_obs * n_latents);
 
 			stats->num_datapoints++;
+
+			// Check for NaN before writing
+			check_nan(latents_mu_smoothed, n_latents, "latents_mu_smoothed (backward)");
+			check_nan(latents_cov_smoothed, n_latents*n_latents, "latents_cov_smoothed (backward)");
+			check_nan(latents_cov_lag1, n_latents*n_latents, "latents_cov_lag1 (backward)");
 
 			fwrite(latents_mu_smoothed,sizeof(float),n_latents,backw_file);
 			fwrite(latents_cov_smoothed,sizeof(float),n_latents*n_latents,backw_file);

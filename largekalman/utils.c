@@ -95,6 +95,20 @@ void vector_minusequals(float *A, float *B, int n) {
 	}
 }
 
+int check_nan(float *arr, int n, const char *name) {
+	int count = 0;
+	for (int i = 0; i < n; i++) {
+		if (isnan(arr[i]) || isinf(arr[i])) {
+			count++;
+		}
+	}
+	if (count > 0) {
+		fprintf(stderr, "WARNING: %d NaN/Inf values in %s\n", count, name);
+		fflush(stderr);
+	}
+	return count;
+}
+
 void solve(float *A, float *B, int n, int m) {
 	// Gaussian elimination with partial pivoting
 	// Handles singular/near-singular matrices by using regularization
