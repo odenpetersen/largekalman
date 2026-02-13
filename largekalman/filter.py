@@ -42,6 +42,10 @@ class SuffStats(ctypes.Structure):
         ("obs_sum", ctypes.POINTER(ctypes.c_float)),
         ("obs_obs_sum", ctypes.POINTER(ctypes.c_float)),
         ("obs_latents_sum", ctypes.POINTER(ctypes.c_float)),
+        ("latents_mu_prev_sum", ctypes.POINTER(ctypes.c_float)),
+        ("latents_mu_next_sum", ctypes.POINTER(ctypes.c_float)),
+        ("latents_cov_prev_sum", ctypes.POINTER(ctypes.c_float)),
+        ("latents_cov_next_sum", ctypes.POINTER(ctypes.c_float)),
     ]
 
 lib.write_backwards.restype = ctypes.POINTER(SuffStats)
@@ -100,22 +104,28 @@ def write_backwards(params_file, obs_file, forwards_file, backwards_file, buffer
 
     # Convert to Python dict
     stats = stats_ptr.contents
+    nl = stats.n_latents
+    no = stats.n_obs
     result = {
-        'n_obs': stats.n_obs,
-        'n_latents': stats.n_latents,
+        'n_obs': no,
+        'n_latents': nl,
         'num_datapoints': stats.num_datapoints,
-        'latents_mu_sum': [stats.latents_mu_sum[i] for i in range(stats.n_latents)],
-        'latents_cov_sum': [stats.latents_cov_sum[i] for i in range(stats.n_latents * stats.n_latents)],
-        'latents_cov_lag1_sum': [stats.latents_cov_lag1_sum[i] for i in range(stats.n_latents * stats.n_latents)],
-        'obs_sum': [stats.obs_sum[i] for i in range(stats.n_obs)],
-        'obs_obs_sum': [stats.obs_obs_sum[i] for i in range(stats.n_obs * stats.n_obs)],
-        'obs_latents_sum': [stats.obs_latents_sum[i] for i in range(stats.n_obs * stats.n_latents)],
+        'latents_mu_sum': [stats.latents_mu_sum[i] for i in range(nl)],
+        'latents_cov_sum': [stats.latents_cov_sum[i] for i in range(nl * nl)],
+        'latents_cov_lag1_sum': [stats.latents_cov_lag1_sum[i] for i in range(nl * nl)],
+        'obs_sum': [stats.obs_sum[i] for i in range(no)],
+        'obs_obs_sum': [stats.obs_obs_sum[i] for i in range(no * no)],
+        'obs_latents_sum': [stats.obs_latents_sum[i] for i in range(no * nl)],
+        'latents_mu_prev_sum': [stats.latents_mu_prev_sum[i] for i in range(nl)],
+        'latents_mu_next_sum': [stats.latents_mu_next_sum[i] for i in range(nl)],
+        'latents_cov_prev_sum': [stats.latents_cov_prev_sum[i] for i in range(nl * nl)],
+        'latents_cov_next_sum': [stats.latents_cov_next_sum[i] for i in range(nl * nl)],
     }
 
     lib.free_suffstats(stats_ptr)
     return result
 
-def write_params(F,Q,H,R,params_file):
+def write_params(F, Q, H, R, params_file, c=None, d=None):
     c_params_file = lib.open_file_write(params_file.encode('utf-8'))
 
     n_latents, n_obs = len(Q), len(R)
@@ -132,9 +142,18 @@ def write_params(F,Q,H,R,params_file):
     ptr = ctypes.cast(params_array.buffer_info()[0], ctypes.POINTER(ctypes.c_float))
     lib.write_floats(ptr, len(params_array), c_params_file)
 
+    # Write drift vectors c and d (default to zeros)
+    if c is None:
+        c = [0.0] * n_latents
+    if d is None:
+        d = [0.0] * n_obs
+    cd_array = array.array('f', list(c) + list(d))
+    ptr = ctypes.cast(cd_array.buffer_info()[0], ctypes.POINTER(ctypes.c_float))
+    lib.write_floats(ptr, len(cd_array), c_params_file)
+
     lib.close_file(c_params_file)
 
-def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True):
+def write_files(tmp_folder_path, F, Q, H, R, observations_iter=None, store_observations=True, c=None, d=None):
     if not os.path.exists(tmp_folder_path):
         os.makedirs(tmp_folder_path)
 
@@ -143,7 +162,7 @@ def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observat
         write_observations(observations_iter, observations_file)
 
     params_file = f"{tmp_folder_path}/params.bin"
-    write_params(F,Q,H,R,params_file)
+    write_params(F, Q, H, R, params_file, c=c, d=d)
 
     forwards_file = f"{tmp_folder_path}/forwards.bin"
     write_forwards(observations_file, forwards_file, params_file)
@@ -157,7 +176,7 @@ def write_files(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observat
     return forwards_file, backwards_file, stats
 
 
-def _smooth_memory(F, Q, H, R, observations, return_filtered=False):
+def _smooth_memory(F, Q, H, R, observations, return_filtered=False, c=None, d=None):
     """In-memory Kalman smoother for small datasets."""
     observations = [np.array(obs) for obs in observations]
     F, Q, H, R = np.array(F), np.array(Q), np.array(H), np.array(R)
@@ -165,24 +184,28 @@ def _smooth_memory(F, Q, H, R, observations, return_filtered=False):
     n_obs = H.shape[0]
     T = len(observations)
 
+    c_vec = np.zeros(n_latents) if c is None else np.array(c).ravel()
+    d_vec = np.zeros(n_obs) if d is None else np.array(d).ravel()
+
     # Forward pass - store filtered means and covariances
     mus = []
     covs = []
 
     for t, y in enumerate(observations):
         if t == 0:
-            # Initialize from first observation
+            # Initialize from first observation: x = H^T (HH^T)^{-1} (y - d)
             HHT = H @ H.T
-            mu = H.T @ np.linalg.solve(HHT, y)
+            y_adj = y - d_vec
+            mu = H.T @ np.linalg.solve(HHT, y_adj)
             cov = np.zeros((n_latents, n_latents))
         else:
-            # Predict
-            mu_pred = F @ mus[-1]
+            # Predict: x = F @ x + c
+            mu_pred = F @ mus[-1] + c_vec
             cov_pred = F @ covs[-1] @ F.T + Q
-            # Update
+            # Update: innovation = y - d - H @ mu_pred
             S = H @ cov_pred @ H.T + R
             K = cov_pred @ H.T @ np.linalg.solve(S, np.eye(n_obs))
-            mu = mu_pred + K @ (y - H @ mu_pred)
+            mu = mu_pred + K @ (y - d_vec - H @ mu_pred)
             cov = cov_pred - K @ H @ cov_pred
         mus.append(mu)
         covs.append(cov)
@@ -198,6 +221,10 @@ def _smooth_memory(F, Q, H, R, observations, return_filtered=False):
         'obs_sum': np.zeros(n_obs),
         'obs_obs_sum': np.zeros((n_obs, n_obs)),
         'obs_latents_sum': np.zeros((n_obs, n_latents)),
+        'latents_mu_prev_sum': np.zeros(n_latents),
+        'latents_mu_next_sum': np.zeros(n_latents),
+        'latents_cov_prev_sum': np.zeros((n_latents, n_latents)),
+        'latents_cov_next_sum': np.zeros((n_latents, n_latents)),
     }
 
     # Last timestep: smoothed = filtered
@@ -217,7 +244,7 @@ def _smooth_memory(F, Q, H, R, observations, return_filtered=False):
     # Backward iteration
     for t in range(T - 2, -1, -1):
         mu, cov = mus[t], covs[t]
-        mu_pred = F @ mu
+        mu_pred = F @ mu + c_vec
         cov_pred = F @ cov @ F.T + Q
 
         # RTS gain: G = cov @ F.T @ inv(cov_pred)
@@ -229,6 +256,12 @@ def _smooth_memory(F, Q, H, R, observations, return_filtered=False):
 
         # Lag-1 covariance: E[x_{t+1} x_t^T]
         lag1_cov = cov_smooth @ G.T + np.outer(mu_smooth, mu_smooth_new)
+
+        # Transition-pair stats (before updating mu_smooth)
+        stats['latents_mu_prev_sum'] += mu_smooth_new  # will become mu_smooth after swap
+        stats['latents_mu_next_sum'] += mu_smooth  # mu_{t+1}
+        stats['latents_cov_prev_sum'] += cov_smooth_new + np.outer(mu_smooth_new, mu_smooth_new)
+        stats['latents_cov_next_sum'] += cov_smooth + np.outer(mu_smooth, mu_smooth)
 
         mu_smooth, cov_smooth = mu_smooth_new, cov_smooth_new
         results.append((mu_smooth.copy(), cov_smooth.copy(), lag1_cov.copy(), mus[t].copy()))
@@ -256,6 +289,10 @@ def _smooth_memory(F, Q, H, R, observations, return_filtered=False):
         'obs_sum': stats['obs_sum'].tolist(),
         'obs_obs_sum': stats['obs_obs_sum'].flatten().tolist(),
         'obs_latents_sum': stats['obs_latents_sum'].flatten().tolist(),
+        'latents_mu_prev_sum': stats['latents_mu_prev_sum'].tolist(),
+        'latents_mu_next_sum': stats['latents_mu_next_sum'].tolist(),
+        'latents_cov_prev_sum': stats['latents_cov_prev_sum'].flatten().tolist(),
+        'latents_cov_next_sum': stats['latents_cov_next_sum'].flatten().tolist(),
     }
 
     def gen():
@@ -268,17 +305,17 @@ def _smooth_memory(F, Q, H, R, observations, return_filtered=False):
     return gen(), stats_out
 
 
-def smooth(tmp_folder_path, F,Q,H,R, observations_iter=None, store_observations=True, batch_size=10000, return_filtered=False):
+def smooth(tmp_folder_path, F, Q, H, R, observations_iter=None, store_observations=True, batch_size=10000, return_filtered=False, c=None, d=None):
     # In-memory mode when tmp_folder is None
     if tmp_folder_path is None:
         if observations_iter is None:
             raise ValueError("observations_iter required for in-memory mode")
         observations = list(observations_iter)
-        return _smooth_memory(F, Q, H, R, observations, return_filtered=return_filtered)
+        return _smooth_memory(F, Q, H, R, observations, return_filtered=return_filtered, c=c, d=d)
 
     # Disk-based mode
-    forwards_file, backwards_file, stats = write_files(tmp_folder_path, F,Q,H,R, observations_iter,
-                                                        store_observations=store_observations)
+    forwards_file, backwards_file, stats = write_files(tmp_folder_path, F, Q, H, R, observations_iter,
+                                                        store_observations=store_observations, c=c, d=d)
     n_latents = len(Q)
     smooth_record_size = n_latents + 2 * n_latents * n_latents  # mu + cov + lag1_cov
     smooth_record_bytes = smooth_record_size * 4

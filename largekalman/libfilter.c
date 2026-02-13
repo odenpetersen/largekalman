@@ -15,6 +15,10 @@ typedef struct {
 	float *obs_sum;                // [n_obs]
 	float *obs_obs_sum;            // [n_obs * n_obs]
 	float *obs_latents_sum;        // [n_obs * n_latents]
+	float *latents_mu_prev_sum;    // [n_latents] sum_{t=0}^{T-2} E[x_t]
+	float *latents_mu_next_sum;    // [n_latents] sum_{t=0}^{T-2} E[x_{t+1}]
+	float *latents_cov_prev_sum;   // [n_latents * n_latents] sum_{t=0}^{T-2} E[x_t x_t^T]
+	float *latents_cov_next_sum;   // [n_latents * n_latents] sum_{t=0}^{T-2} E[x_{t+1} x_{t+1}^T]
 } SuffStats;
 
 void free_suffstats(SuffStats *stats) {
@@ -25,6 +29,10 @@ void free_suffstats(SuffStats *stats) {
 		free(stats->obs_sum);
 		free(stats->obs_obs_sum);
 		free(stats->obs_latents_sum);
+		free(stats->latents_mu_prev_sum);
+		free(stats->latents_mu_next_sum);
+		free(stats->latents_cov_prev_sum);
+		free(stats->latents_cov_next_sum);
 		free(stats);
 	}
 }
@@ -194,6 +202,12 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 		fread(R_const, sizeof(float), R_size, param_file);
 	}
 
+	// Read drift vectors c and d
+	float *c_vec = calloc(n_latents, sizeof(float));
+	float *d_vec = calloc(n_obs, sizeof(float));
+	fread(c_vec, sizeof(float), n_latents, param_file);
+	fread(d_vec, sizeof(float), n_obs, param_file);
+
 	int param_line_size = (F_is_const ? 0 : F_size) + (H_is_const ? 0 : H_size) + (Q_is_const ? 0 : Q_size) + (R_is_const ? 0 : R_size);
 
 	float *obs_buffer = malloc(buffer_size * n_obs * sizeof(float));
@@ -221,7 +235,8 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 			//printf("\n");
 
 			if (!latents_initialised){
-				//x <- H.T@(H@H.T)^-1@obs
+				//x <- H.T@(H@H.T)^-1@(obs - d)
+				vector_minusequals(obs, d_vec, n_obs);
 				float *HHT = malloc(n_obs*n_obs*sizeof(float));
 				matmul_transposed(H,H,HHT,n_obs,n_latents,n_obs);
 				solve(HHT, obs, n_obs, 1);
@@ -231,10 +246,11 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 				latents_initialised = true;
 				free(HHT);
 			} else {
-				//x <- F@x
+				//x <- F@x + c
 				float *latents_mu_old = malloc(n_latents*sizeof(float));
 				memcpy(latents_mu_old, latents_mu, n_latents*sizeof(float));
 				matmul(F,latents_mu_old,latents_mu,n_latents,n_latents,1);
+				vector_plusequals(latents_mu, c_vec, n_latents);
 				free(latents_mu_old);
 				//P <- F@P@F.T+Q
 				float *FP = malloc(n_latents*n_latents*sizeof(float));
@@ -252,7 +268,8 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 				vector_plusequals(HPHT_R,R,n_obs*n_obs);
 				solve(HPHT_R,KT,n_obs,n_latents);
 				free(HPHT_R);
-				//x <- x + K@(obs - H@x)
+				//x <- x + K@(obs - d - H@x)
+				vector_minusequals(obs, d_vec, n_obs);
 				float *pred = malloc(n_obs*sizeof(float));
 				matmul(H,latents_mu,pred,n_obs,n_latents,1);
 				vector_minusequals(obs,pred,n_obs); //modifies obs
@@ -340,6 +357,8 @@ void write_forwards(FILE *obs_file, FILE *param_file, FILE *forw_file, int buffe
 	free(param_buffer);
 	free(latents_mu);
 	free(latents_cov);
+	free(c_vec);
+	free(d_vec);
 }
 
 //Backwards step
@@ -377,6 +396,12 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 	if (R_is_const) {
 		fread(R_const, sizeof(float), R_size, param_file);
 	}
+
+	// Read drift vectors c and d
+	float *c_vec = calloc(n_latents, sizeof(float));
+	float *d_vec = calloc(n_obs, sizeof(float));
+	fread(c_vec, sizeof(float), n_latents, param_file);
+	fread(d_vec, sizeof(float), n_obs, param_file);
 
 	long param_data_start = ftell(param_file);
 
@@ -441,6 +466,10 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 	stats->obs_sum = calloc(n_obs, sizeof(float));
 	stats->obs_obs_sum = calloc(n_obs * n_obs, sizeof(float));
 	stats->obs_latents_sum = calloc(n_obs * n_latents, sizeof(float));
+	stats->latents_mu_prev_sum = calloc(n_latents, sizeof(float));
+	stats->latents_mu_next_sum = calloc(n_latents, sizeof(float));
+	stats->latents_cov_prev_sum = calloc(n_latents * n_latents, sizeof(float));
+	stats->latents_cov_next_sum = calloc(n_latents * n_latents, sizeof(float));
 
 	// Accumulate stats for last timestep (no lag1_cov for this one)
 	fseek(obs_file, 0, SEEK_END);
@@ -548,6 +577,7 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 
 			matmul(F, latents_mu, latents_mu_pred,
 				   n_latents, n_latents, 1);
+			vector_plusequals(latents_mu_pred, c_vec, n_latents);
 
 			matmul(F, latents_cov, FP,
 				   n_latents, n_latents, n_latents);
@@ -631,6 +661,19 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 			matmul_transposed(latents_mu_smoothed_next, latents_mu_smoothed, mu_cross, n_latents, 1, n_latents);
 			vector_plusequals(stats->latents_cov_lag1_sum, mu_cross, n_latents*n_latents);
 
+			// Transition-pair sufficient statistics (t=0..T-2)
+			vector_plusequals(stats->latents_mu_prev_sum, latents_mu_smoothed, n_latents);
+			vector_plusequals(stats->latents_mu_next_sum, latents_mu_smoothed_next, n_latents);
+			// latents_cov_prev_sum: sum E[x_t x_t^T] (reuse mu_outer already computed above)
+			vector_plusequals(stats->latents_cov_prev_sum, latents_cov_smoothed, n_latents*n_latents);
+			vector_plusequals(stats->latents_cov_prev_sum, mu_outer, n_latents*n_latents);
+			// latents_cov_next_sum: sum E[x_{t+1} x_{t+1}^T]
+			float *mu_next_outer = malloc(n_latents * n_latents * sizeof(float));
+			matmul_transposed(latents_mu_smoothed_next, latents_mu_smoothed_next, mu_next_outer, n_latents, 1, n_latents);
+			vector_plusequals(stats->latents_cov_next_sum, latents_cov_smoothed_next, n_latents*n_latents);
+			vector_plusequals(stats->latents_cov_next_sum, mu_next_outer, n_latents*n_latents);
+			free(mu_next_outer);
+
 			// NOW update _next variables for the next iteration
 			memcpy(latents_mu_smoothed_next,
 				   latents_mu_smoothed,
@@ -697,6 +740,8 @@ SuffStats* write_backwards(FILE *param_file, FILE *obs_file, FILE *forw_file, FI
 	free(latents_mu_smoothed_next);
 	free(latents_cov_smoothed_next);
 	free(latents_cov_lag1);
+	free(c_vec);
+	free(d_vec);
 
 	return stats;
 }

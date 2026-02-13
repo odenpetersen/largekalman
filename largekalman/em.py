@@ -5,18 +5,20 @@ import shutil
 from .filter import smooth, write_observations, write_params, write_forwards, write_backwards
 
 
-def _m_step(stats, n_latents, n_obs, F, Q, H, R, fixed_params):
+def _m_step(stats, n_latents, n_obs, F, Q, H, R, c, d, fixed_params):
     """M-step: update parameters given sufficient statistics.
 
     Args:
         stats: Sufficient statistics dict from E-step
         n_latents: Number of latent dimensions
         n_obs: Number of observation dimensions
-        F, Q, H, R: Current parameters
+        F, Q, H, R: Current parameters (matrices)
+        c: Current state drift vector [n_latents]
+        d: Current observation intercept vector [n_obs]
         fixed_params: Set of parameter names to hold fixed
 
     Returns:
-        F, Q, H, R: Updated parameters
+        F, Q, H, R, c, d: Updated parameters
     """
     n = stats['num_datapoints']
 
@@ -25,61 +27,126 @@ def _m_step(stats, n_latents, n_obs, F, Q, H, R, fixed_params):
     latents_cov_lag1_sum = np.array(stats['latents_cov_lag1_sum']).reshape(n_latents, n_latents)
     obs_obs_sum = np.array(stats['obs_obs_sum']).reshape(n_obs, n_obs)
     obs_latents_sum = np.array(stats['obs_latents_sum']).reshape(n_obs, n_latents)
+    latents_mu_sum = np.array(stats['latents_mu_sum'])
+    obs_sum = np.array(stats['obs_sum'])
 
-    # Compute expectations
+    # New transition-pair stats for drift estimation
+    latents_mu_prev_sum = np.array(stats['latents_mu_prev_sum'])
+    latents_mu_next_sum = np.array(stats['latents_mu_next_sum'])
+    latents_cov_prev_sum = np.array(stats['latents_cov_prev_sum']).reshape(n_latents, n_latents)
+    latents_cov_next_sum = np.array(stats['latents_cov_next_sum']).reshape(n_latents, n_latents)
+
+    n_trans = n - 1  # number of transition pairs
+
+    # Normalized expectations
+    E_xx_prev = latents_cov_prev_sum / n_trans
+    E_xx_next = latents_cov_next_sum / n_trans
+    E_xx_lag1 = latents_cov_lag1_sum / n_trans
+    E_x_prev = latents_mu_prev_sum / n_trans
+    E_x_next = latents_mu_next_sum / n_trans
     E_xx = latents_cov_sum / n
-    E_xx_lag1 = latents_cov_lag1_sum / (n - 1)
+    E_x = latents_mu_sum / n
     E_yy = obs_obs_sum / n
     E_yx = obs_latents_sum / n
+    E_y = obs_sum / n
 
-    # Update F: F = E[x_{t+1} x_t^T] @ inv(E[x_t x_t^T])
-    if 'F' not in fixed_params:
+    # --- Update F and c ---
+    update_F = 'F' not in fixed_params
+    update_c = 'C' not in fixed_params
+
+    if update_F and update_c:
+        # Joint augmented regression: [F,c] = A @ inv(B)
         try:
-            F_new = E_xx_lag1 @ np.linalg.inv(E_xx)
+            A_aug = np.column_stack([E_xx_lag1, E_x_next[:, None]])
+            B_aug = np.block([
+                [E_xx_prev, E_x_prev[:, None]],
+                [E_x_prev[None, :], np.array([[1.0]])]
+            ])
+            Fc = A_aug @ np.linalg.inv(B_aug)
+            F_new, c_new = Fc[:, :n_latents], Fc[:, n_latents]
+            if not np.any(np.isnan(F_new)) and not np.any(np.isnan(c_new)):
+                eigvals = np.linalg.eigvals(F_new)
+                max_eig = np.max(np.abs(eigvals))
+                if max_eig > 0.99:
+                    F_new = F_new * (0.99 / max_eig)
+                F, c = F_new, c_new
+        except np.linalg.LinAlgError:
+            pass
+    elif update_F:
+        # F only (c fixed): F = (E[x_{t+1} x_t^T] - c E[x_t]^T) @ inv(E[x_t x_t^T])
+        try:
+            F_new = (E_xx_lag1 - np.outer(c, E_x_prev)) @ np.linalg.inv(E_xx_prev)
             if not np.any(np.isnan(F_new)):
-                # Ensure spectral radius < 1 for stability
                 eigvals = np.linalg.eigvals(F_new)
                 max_eig = np.max(np.abs(eigvals))
                 if max_eig > 0.99:
                     F_new = F_new * (0.99 / max_eig)
                 F = F_new
         except np.linalg.LinAlgError:
-            pass  # Keep previous F
+            pass
+    elif update_c:
+        # c only (F fixed): c = E[x_{t+1}] - F @ E[x_t]
+        c_new = E_x_next - F @ E_x_prev
+        if not np.any(np.isnan(c_new)):
+            c = c_new
 
-    # Update Q: Q = E[x_t x_t^T] - F @ E[x_t x_{t-1}^T]
+    # --- Update Q ---
     if 'Q' not in fixed_params:
-        Q_new = E_xx - F @ E_xx_lag1.T
-        Q_new = (Q_new + Q_new.T) / 2  # Symmetrize
+        Q_new = (E_xx_next
+                 - F @ E_xx_lag1.T
+                 - np.outer(c, E_x_next))
+        Q_new = (Q_new + Q_new.T) / 2
         if not np.any(np.isnan(Q_new)):
-            # Ensure positive definite
             eigvals, eigvecs = np.linalg.eigh(Q_new)
             eigvals = np.clip(eigvals, 1e-6, None)
             Q = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
-    # Update H: H = E[y x^T] @ inv(E[x x^T])
-    if 'H' not in fixed_params:
+    # --- Update H and d ---
+    update_H = 'H' not in fixed_params
+    update_d = 'D' not in fixed_params
+
+    if update_H and update_d:
+        # Joint augmented regression: [H,d] = C @ inv(D)
         try:
-            H_new = E_yx @ np.linalg.inv(E_xx)
+            C_aug = np.column_stack([E_yx, E_y[:, None]])
+            D_aug = np.block([
+                [E_xx, E_x[:, None]],
+                [E_x[None, :], np.array([[1.0]])]
+            ])
+            Hd = C_aug @ np.linalg.inv(D_aug)
+            H_new, d_new = Hd[:, :n_latents], Hd[:, n_latents]
+            if not np.any(np.isnan(H_new)) and not np.any(np.isnan(d_new)):
+                H, d = H_new, d_new
+        except np.linalg.LinAlgError:
+            pass
+    elif update_H:
+        # H only (d fixed): H = (E[y x^T] - d E[x]^T) @ inv(E[x x^T])
+        try:
+            H_new = (E_yx - np.outer(d, E_x)) @ np.linalg.inv(E_xx)
             if not np.any(np.isnan(H_new)):
                 H = H_new
         except np.linalg.LinAlgError:
-            pass  # Keep previous H
+            pass
+    elif update_d:
+        # d only (H fixed): d = E[y] - H @ E[x]
+        d_new = E_y - H @ E_x
+        if not np.any(np.isnan(d_new)):
+            d = d_new
 
-    # Update R: R = E[(y - Hx)(y - Hx)^T]
+    # --- Update R ---
     if 'R' not in fixed_params:
-        R_new = E_yy - H @ E_yx.T - E_yx @ H.T + H @ E_xx @ H.T
+        R_new = (E_yy - H @ E_yx.T - np.outer(d, E_y))
         R_new = (R_new + R_new.T) / 2  # Symmetrize
         if not np.any(np.isnan(R_new)):
-            # Ensure positive definite
             eigvals, eigvecs = np.linalg.eigh(R_new)
             eigvals = np.clip(eigvals, 1e-6, None)
             R = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
-    return F, Q, H, R
+    return F, Q, H, R, c, d
 
 
 def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, fixed=None,
-            batch_size=10000, store_observations=True):
+            batch_size=10000, store_observations=True, c=None, d=None):
     """Run a single EM iteration.
 
     Args:
@@ -87,12 +154,14 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
         F, Q, H, R: Current parameter estimates (as numpy arrays or lists)
         observations: List of observation vectors (mutually exclusive with observations_file)
         observations_file: Path to pre-written observations file (mutually exclusive with observations)
-        fixed: String of parameter names to hold fixed (e.g. 'H' or 'HR'), or None to update all
+        fixed: String of parameter names to hold fixed (e.g. 'H' or 'HCD'), or None to update all
         batch_size: Buffer size for file I/O operations
         store_observations: If True (default), keep observations file for reuse
+        c: State transition drift vector [n_latents], or None for zeros
+        d: Observation intercept vector [n_obs], or None for zeros
 
     Returns:
-        F_new, Q_new, H_new, R_new: Updated parameters as numpy arrays
+        F_new, Q_new, H_new, R_new, c_new, d_new: Updated parameters as numpy arrays
         stats: Sufficient statistics from the E-step
     """
     if observations is None and observations_file is None:
@@ -107,6 +176,9 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
 
     n_latents = F.shape[0]
     n_obs = H.shape[0]
+
+    c = np.zeros(n_latents) if c is None else np.array(c).ravel()
+    d = np.zeros(n_obs) if d is None else np.array(d).ravel()
 
     # Parse fixed params
     fixed_params = set(fixed.upper()) if fixed else set()
@@ -123,7 +195,8 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
 
     # Write params and run E-step
     params_file = os.path.join(tmp_folder, 'params.bin')
-    write_params(F.tolist(), Q.tolist(), H.tolist(), R.tolist(), params_file)
+    write_params(F.tolist(), Q.tolist(), H.tolist(), R.tolist(), params_file,
+                 c=c.tolist(), d=d.tolist())
 
     forwards_file = os.path.join(tmp_folder, 'forwards.bin')
     write_forwards(obs_file, forwards_file, params_file, buffer_size=batch_size)
@@ -139,9 +212,10 @@ def em_step(tmp_folder, F, Q, H, R, observations=None, observations_file=None, f
         os.remove(obs_file)
 
     # M-step
-    F_new, Q_new, H_new, R_new = _m_step(stats, n_latents, n_obs, F, Q, H, R, fixed_params)
+    F_new, Q_new, H_new, R_new, c_new, d_new = _m_step(
+        stats, n_latents, n_obs, F, Q, H, R, c, d, fixed_params)
 
-    return F_new, Q_new, H_new, R_new, stats
+    return F_new, Q_new, H_new, R_new, c_new, d_new, stats
 
 
 def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
@@ -154,15 +228,15 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
         n_latents: Number of latent dimensions
         n_obs: Number of observation dimensions (required if observations is an iterator)
         n_iters: Number of EM iterations
-        init_params: Optional dict with initial parameters {'F', 'Q', 'H', 'R'}
-        fixed: String of parameter names to hold fixed, e.g. 'H' or 'HR'.
-               At least one parameter must be fixed for identifiability.
+        init_params: Optional dict with initial parameters {'F', 'Q', 'H', 'R', 'c', 'd'}
+        fixed: String of parameter names to hold fixed, e.g. 'H' or 'HCD'.
+               At least one of F, Q, H, R must be fixed for identifiability.
         verbose: Print progress if True
         batch_size: Buffer size for file I/O operations
         store_observations: If True (default), keep observations file for reuse
 
     Returns:
-        params: Dict with fitted parameters {'F', 'Q', 'H', 'R'}
+        params: Dict with fitted parameters {'F', 'Q', 'H', 'R', 'c', 'd'}
         history: List of parameter dicts from each iteration
     """
     # Infer n_obs if not provided
@@ -175,12 +249,13 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
             raise ValueError("n_obs must be provided when observations is an iterator")
 
     # Parse fixed params string
-    valid_params = {'F', 'Q', 'H', 'R'}
+    valid_params = {'F', 'Q', 'H', 'R', 'C', 'D'}
     fixed_params = set(fixed.upper()) if fixed else set()
     invalid = fixed_params - valid_params
     if invalid:
-        raise ValueError(f"Invalid parameter names in fixed='{fixed}': {invalid}. Valid: F, Q, H, R")
-    if len(fixed_params) == 0:
+        raise ValueError(f"Invalid parameter names in fixed='{fixed}': {invalid}. Valid: F, Q, H, R, C, D")
+    matrix_fixed = fixed_params & {'F', 'Q', 'H', 'R'}
+    if len(matrix_fixed) == 0:
         raise ValueError("Model is not identifiable: at least one parameter must be fixed. "
                          "Use fixed='H' (most common) or fixed='Q' to constrain the model.")
 
@@ -190,6 +265,8 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
         Q = np.array(init_params.get('Q', np.eye(n_latents) * 0.1))
         H = np.array(init_params.get('H', np.eye(n_obs, n_latents)))
         R = np.array(init_params.get('R', np.eye(n_obs) * 0.5))
+        c = np.array(init_params.get('c', np.zeros(n_latents)))
+        d = np.array(init_params.get('d', np.zeros(n_obs)))
     else:
         # Default initialization
         F = np.eye(n_latents) * 0.9
@@ -199,6 +276,8 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
         else:
             H = np.eye(n_obs, n_latents)
         R = np.eye(n_obs) * 0.5
+        c = np.zeros(n_latents)
+        d = np.zeros(n_obs)
 
     # Setup folder and write observations once
     if os.path.exists(tmp_folder):
@@ -212,11 +291,12 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
 
     for iteration in range(n_iters):
         # Run EM step with pre-stored observations
-        F, Q, H, R, stats = em_step(
+        F, Q, H, R, c, d, stats = em_step(
             tmp_folder, F, Q, H, R,
             observations_file=observations_file,
             fixed=fixed,
-            batch_size=batch_size
+            batch_size=batch_size,
+            c=c, d=d
         )
 
         # Store history
@@ -225,6 +305,8 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
             'Q': Q.copy(),
             'H': H.copy(),
             'R': R.copy(),
+            'c': c.copy(),
+            'd': d.copy(),
         })
 
         if verbose:
@@ -232,9 +314,13 @@ def em(tmp_folder, observations, n_latents, n_obs=None, n_iters=20,
             print(f"  F diag: {np.diag(F)}")
             print(f"  Q diag: {np.diag(Q)}")
             print(f"  R diag: {np.diag(R)}")
+            if np.any(c != 0):
+                print(f"  c: {c}")
+            if np.any(d != 0):
+                print(f"  d: {d}")
 
     # Cleanup
     if not store_observations and os.path.exists(tmp_folder):
         shutil.rmtree(tmp_folder)
 
-    return {'F': F, 'Q': Q, 'H': H, 'R': R}, history
+    return {'F': F, 'Q': Q, 'H': H, 'R': R, 'c': c, 'd': d}, history
